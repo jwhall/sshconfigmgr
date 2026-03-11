@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sshconfigmgr"
+version = "0.1.0"
+description = "TUI for managing SSH client configurations"
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.70.0",
+]
+
+[project.scripts]
+sshconfigmgr = "main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+exclude = ["*.pyc", "__pycache__"]
