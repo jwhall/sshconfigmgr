@@ -2,7 +2,7 @@
 
 A terminal UI for managing SSH client configuration files (`~/.ssh/config`).
 
-![sshconfigmgr screenshot](https://raw.githubusercontent.com/jwhall/sshconfigmgr/main/screenshot.png)
+![sshconfigmgr screenshot](screenshot.png)
 
 ## Features
 
