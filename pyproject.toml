@@ -11,6 +11,11 @@ dependencies = [
     "textual>=0.70.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jwhall/sshconfigmgr"
+Repository = "https://github.com/jwhall/sshconfigmgr.git"
+Issues = "https://github.com/jwhall/sshconfigmgr/issues"
+
 [project.scripts]
 sshconfigmgr = "main:main"
 
