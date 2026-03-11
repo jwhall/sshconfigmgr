@@ -81,11 +81,13 @@ ListItem {
     padding: 0 2;
     color: #888888;
     height: 1;
+    border: none;
 }
 
 ListItem.--highlight {
     background: #1a2e3a;
     color: #c8c8c8;
+    border: none;
 }
 
 ListItem > Label {
@@ -314,11 +316,12 @@ class InputScreen(ModalScreen[Optional[str]]):
         Binding("escape", "dismiss(None)", show=False),
     ]
 
-    def __init__(self, prompt: str, title: str = "Input", default: str = "") -> None:
+    def __init__(self, prompt: str, title: str = "Input", default: str = "", confirm_label: str = "OK") -> None:
         super().__init__()
         self._prompt = prompt
         self._title = title
         self._default = default
+        self._confirm_label = confirm_label
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
@@ -327,7 +330,7 @@ class InputScreen(ModalScreen[Optional[str]]):
             yield Input(self._default, id="dialog-input")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
-                yield Button("OK", id="ok", variant="primary")
+                yield Button(self._confirm_label, id="ok", variant="primary")
 
     def on_mount(self) -> None:
         inp = self.query_one("#dialog-input", Input)
@@ -556,7 +559,7 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="add-field-dialog"):
-            yield Label("Add Configuration Field", classes="dialog-title")
+            yield Label("Add Configuration Keyword", classes="dialog-title")
             yield Input(placeholder="Type to filter…", id="kw-input")
             yield ListView(id="suggestion-list")
             with Horizontal(classes="dialog-buttons"):
@@ -702,11 +705,12 @@ class SSHConfigApp(App[None]):
                 yield HostListView(id="host-list")
                 with Horizontal(id="sidebar-actions"):
                     yield Button("New Host", id="btn-new")
+                    yield Button("Edit Host", id="btn-edit-host")
             with Vertical(id="editor"):
                 yield Static("", id="editor-header", classes="pane-title")
                 with VerticalScroll(id="params-scroll"):
                     yield Static("← select a host entry", id="empty-msg")
-                    yield Button("+ Add Field", id="add-field")
+                    yield Button("+ Add Keyword", id="add-field")
                 with Horizontal(classes="action-bar"):
                     yield Button("Delete", id="btn-delete")
                     yield Button("Save", id="btn-save", variant="primary")
@@ -836,6 +840,8 @@ class SSHConfigApp(App[None]):
             self._do_add_field()
         elif bid == "btn-new":
             self.action_new_host()
+        elif bid == "btn-edit-host":
+            self.action_edit_host()
         elif bid == "btn-delete":
             self.action_delete_host()
         elif bid == "btn-save":
@@ -864,6 +870,36 @@ class SSHConfigApp(App[None]):
 
         self.push_screen(
             InputScreen("Host pattern (e.g. myserver, bastion, *.corp)", "New Host Entry"),
+            on_result,
+        )
+
+    def action_edit_host(self) -> None:
+        if self._current_entry is None:
+            self.notify("No host selected.", severity="warning")
+            return
+        entry = self._current_entry
+
+        def on_result(new_pattern: Optional[str]) -> None:
+            if not new_pattern:
+                return
+            entry.pattern = new_pattern
+            lv = self.query_one("#host-list", HostListView)
+            current_idx = lv.index
+            self._loading = True
+            self._rebuild_list()
+            self._loading = False
+            self.query_one("#editor-header", Static).update(f"  Host {entry.pattern}")
+            if current_idx is not None:
+                lv.index = current_idx
+            self._mark_modified()
+
+        self.push_screen(
+            InputScreen(
+                "Enter Host names or aliases separated by a space",
+                "Edit Host",
+                default=entry.pattern,
+                confirm_label="Save",
+            ),
             on_result,
         )
 
