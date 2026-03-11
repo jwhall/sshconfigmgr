@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sshconfigmgr"
-version = "0.1.0"
+version = "0.2.0"
 description = "TUI for managing SSH client configurations"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,8 +17,10 @@ Repository = "https://github.com/jwhall/sshconfigmgr.git"
 Issues = "https://github.com/jwhall/sshconfigmgr/issues"
 
 [project.scripts]
-sshconfigmgr = "main:main"
+sshconfigmgr = "sshconfigmgr.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
-exclude = ["*.pyc", "__pycache__"]
+packages = ["src/sshconfigmgr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
