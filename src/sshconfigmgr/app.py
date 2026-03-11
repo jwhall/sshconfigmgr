@@ -92,6 +92,11 @@ ListItem.--highlight {
 
 ListItem > Label {
     width: 100%;
+    color: #888888;
+}
+
+ListItem.--highlight > Label {
+    color: #c8c8c8;
 }
 
 #sidebar-actions {
@@ -241,7 +246,7 @@ ConfirmScreen, InputScreen {
     background: #222222;
     border: solid #444444;
     padding: 1 2;
-    width: 52;
+    width: 60;
     height: auto;
 }
 
