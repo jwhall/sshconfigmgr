@@ -79,7 +79,7 @@ If the specified file does not exist you will be prompted to create it.
 │                  │  + Add Field                                      │
 │                  │                                                   │
 ├──────────────────┤                         ┌────────┬───────┬──────┐ │
-│  New Host        │                         │ Delete │ Save  │ Quit │ │
+│  New   Edit      │                         │ Delete │ Save  │ Quit │ │
 └──────────────────┴─────────────────────────┴────────┴───────┴──────┘─┘
 ```
 
