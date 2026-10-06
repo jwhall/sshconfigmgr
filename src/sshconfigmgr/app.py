@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from rich.text import Text
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -12,16 +14,18 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import (
     Button,
+    Checkbox,
     Footer,
     Header,
     Input,
     Label,
-    ListItem,
-    ListView,
+    OptionList,
     Static,
 )
+from textual.widgets.option_list import Option
 
-from sshconfigmgr.ssh_config import HostEntry, SSHConfig
+from sshconfigmgr import ssh_validate
+from sshconfigmgr.ssh_config import ConfigChangedError, HostEntry, SSHConfig
 
 # ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -65,38 +69,38 @@ Footer {
     background: #202020;
     color: #505050;
     padding: 0 1;
-    height: 1;
+    /* Heights include the border: one row of text plus the bottom border. */
+    height: 2;
     border-bottom: solid #2a2a2a;
     text-style: bold;
 }
 
-ListView {
+#host-list {
     background: #1c1c1c;
     height: 1fr;
+    max-height: 100%;
     border: none;
     padding: 1 0;
 }
 
-ListItem {
+#host-list:focus {
+    border: none;
+}
+
+#host-list > .option-list--option {
     padding: 0 2;
     color: #888888;
-    height: 1;
-    border: none;
 }
 
-ListItem.--highlight {
+#host-list > .option-list--option-highlighted,
+#host-list:focus > .option-list--option-highlighted {
     background: #1a2e3a;
     color: #c8c8c8;
-    border: none;
+    text-style: none;
 }
 
-ListItem > Label {
-    width: 100%;
-    color: #888888;
-}
-
-ListItem.--highlight > Label {
-    color: #c8c8c8;
+#host-list > .option-list--option-hover {
+    background: #222222;
 }
 
 #sidebar-actions {
@@ -127,11 +131,7 @@ ListItem.--highlight > Label {
 }
 
 #editor-header {
-    background: #202020;
     color: #6a9fb5;
-    padding: 0 1;
-    height: 1;
-    border-bottom: solid #2a2a2a;
 }
 
 #params-scroll {
@@ -238,7 +238,8 @@ Input:focus {
 
 /* ── Modal dialogs ── */
 
-ConfirmScreen, InputScreen {
+ConfirmScreen, InputScreen, UnsavedChangesScreen, SaveScreen,
+ValidationFailedScreen, ValidationErrorScreen {
     align: center middle;
 }
 
@@ -259,6 +260,8 @@ ConfirmScreen, InputScreen {
 .dialog-msg {
     color: #a0a0a0;
     margin-bottom: 0;
+    /* Full width so long messages (e.g. file paths) wrap instead of clipping. */
+    width: 100%;
 }
 
 .dialog-buttons {
@@ -279,6 +282,34 @@ ConfirmScreen, InputScreen {
 .dialog-buttons Button.-primary {
     border: tall #2a5070;
     color: #6a9fb5;
+}
+
+.dialog-wide {
+    width: 90%;
+    max-width: 110;
+}
+
+#validation-output {
+    height: auto;
+    max-height: 15;
+    background: #181818;
+    border: tall #2e2e2e;
+    padding: 0 1;
+}
+
+#validation-output Static {
+    color: #c8c8c8;
+}
+
+#validate-ssh {
+    margin-top: 1;
+    background: transparent;
+    border: none;
+    color: #a0a0a0;
+}
+
+#validate-ssh:focus {
+    color: #d4d4d4;
 }
 
 .dialog-buttons Button.-error {
@@ -354,24 +385,86 @@ class InputScreen(ModalScreen[Optional[str]]):
             self.dismiss(None)
 
 
-class QuitConfirmScreen(ModalScreen[Optional[str]]):
-    """Three-way dialog: Save / Discard / Cancel when quitting with unsaved changes.
+VALIDATE_LABEL = "Validate config with SSH?"
 
-    Dismisses with: "save", "discard", or None (cancel).
+
+def validate_checkbox(value: bool, available: bool) -> Checkbox:
+    """The "Validate config with SSH?" option shown in Save and Quit dialogs."""
+    if available:
+        return Checkbox(VALIDATE_LABEL, value, id="validate-ssh")
+    return Checkbox(f"{VALIDATE_LABEL} (ssh not found)", False, id="validate-ssh", disabled=True)
+
+
+class SaveScreen(ModalScreen[bool]):
+    """Confirm saving, with the option to validate with ssh first.
+
+    Dismisses with True (save) or False (cancel); the checkbox state is
+    available afterwards as ``validate``.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss(False)", show=False),
+    ]
+
+    def __init__(self, path: Path, validate: bool, ssh_available: bool) -> None:
+        super().__init__()
+        self._path = path
+        self.validate = validate
+        self.ssh_available = ssh_available
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label("Save Changes", classes="dialog-title")
+            yield Label(f"Write changes to {self._path}?", classes="dialog-msg")
+            yield validate_checkbox(self.validate, self.ssh_available)
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#save", Button).focus()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        self.validate = event.value
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "save")
+
+
+class UnsavedChangesScreen(ModalScreen[Optional[str]]):
+    """Three-way dialog: Save / Discard / Cancel before leaving unsaved changes.
+
+    *action* names what happens afterwards (e.g. "Quit", "Open").
+    Dismisses with: "save", "discard", or None (cancel); the checkbox state
+    is available afterwards as ``validate``.
     """
 
     BINDINGS = [
         Binding("escape", "dismiss(None)", show=False),
     ]
 
+    def __init__(self, action: str, validate: bool = False, ssh_available: bool = False) -> None:
+        super().__init__()
+        self._action = action
+        self.validate = validate
+        self.ssh_available = ssh_available
+
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Label("Unsaved Changes", classes="dialog-title")
             yield Label("You have unsaved changes. What would you like to do?", classes="dialog-msg")
+            yield validate_checkbox(self.validate, self.ssh_available)
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
-                yield Button("Discard", id="discard", variant="error")
-                yield Button("Save & Quit", id="save", variant="primary")
+                yield Button(f"Discard & {self._action}", id="discard", variant="error")
+                yield Button(f"Save & {self._action}", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        # Keep Cancel as the default so a reflexive Enter loses nothing.
+        self.query_one("#cancel", Button).focus()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        self.validate = event.value
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
@@ -381,6 +474,59 @@ class QuitConfirmScreen(ModalScreen[Optional[str]]):
             self.dismiss("discard")
         else:
             self.dismiss(None)
+
+
+class ValidationFailedScreen(ModalScreen[Optional[str]]):
+    """ssh rejected the config.  Dismisses with "show", "continue", or None
+    (Escape: back to the editor without saving)."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label("❌ Validation failed", classes="dialog-title")
+            yield Label(
+                "ssh reported errors in the configuration. Nothing has been written yet.",
+                classes="dialog-msg",
+            )
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Show error", id="show", variant="primary")
+                yield Button("Continue anyway", id="continue", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#show", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
+
+
+class ValidationErrorScreen(ModalScreen[None]):
+    """Shows the output of the ssh validation run."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", show=False),
+    ]
+
+    def __init__(self, output: str) -> None:
+        super().__init__()
+        self._output = output
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog dialog-wide"):
+            yield Label("SSH Validation Error", classes="dialog-title")
+            with VerticalScroll(id="validation-output"):
+                # Text, not str: ssh output must not be parsed as markup.
+                yield Static(Text(self._output))
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Close", id="close", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#close", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
 
 
 # ─── SSH keyword data ──────────────────────────────────────────────────────────
@@ -484,6 +630,35 @@ SSH_KEYWORDS_SINGLE: list[str] = [
 _SINGLE_LOWER: set[str] = {k.lower() for k in SSH_KEYWORDS_SINGLE}
 
 
+class NoWrapOptionList(OptionList):
+    """OptionList whose cursor stops at the first and last option.
+
+    OptionList wraps around at the ends by default; ListView, which these
+    lists replaced, did not.
+    """
+
+    def action_cursor_down(self) -> None:
+        if self.highlighted is None or self.highlighted < self.option_count - 1:
+            super().action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        if self.highlighted is None or self.highlighted > 0:
+            super().action_cursor_up()
+
+
+class KeywordList(NoWrapOptionList):
+    """Suggestion list for AddFieldScreen; Up on the first option posts AtTop."""
+
+    class AtTop(Message):
+        pass
+
+    def action_cursor_up(self) -> None:
+        if self.highlighted in (None, 0):
+            self.post_message(self.AtTop())
+        else:
+            super().action_cursor_up()
+
+
 class AddFieldScreen(ModalScreen[Optional[str]]):
     """Modal for choosing a new SSH config keyword with live-filtered suggestions.
 
@@ -492,6 +667,7 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
 
     BINDINGS = [
         Binding("escape", "dismiss(None)", show=False),
+        Binding("down", "focus_suggestions", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -503,8 +679,10 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
         border: solid #444444;
         padding: 1 2;
         width: 60;
-        height: auto;
-        max-height: 80vh;
+        /* Fixed height so the list below can flex: on short terminals the
+           list shrinks and the buttons stay visible. */
+        height: 80%;
+        max-height: 26;
     }
     #add-field-dialog .dialog-title {
         text-style: bold;
@@ -512,18 +690,21 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
         margin-bottom: 1;
     }
     #suggestion-list {
-        height: 10;
+        height: 1fr;
+        min-height: 3;
         border: tall #2e2e2e;
         background: #181818;
         margin-top: 0;
         margin-bottom: 1;
     }
-    #suggestion-list ListItem {
+    #suggestion-list > .option-list--option {
         padding: 0 1;
     }
-    #suggestion-list ListItem.--highlight {
+    #suggestion-list > .option-list--option-highlighted,
+    #suggestion-list:focus > .option-list--option-highlighted {
         background: #1a2e3a;
         color: #c8c8c8;
+        text-style: none;
     }
     #add-field-dialog .dialog-buttons {
         layout: horizontal;
@@ -566,7 +747,7 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
         with Vertical(id="add-field-dialog"):
             yield Label("Add Configuration Keyword", classes="dialog-title")
             yield Input(placeholder="Type to filter…", id="kw-input")
-            yield ListView(id="suggestion-list")
+            yield KeywordList(id="suggestion-list")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Add", id="add-kw", variant="primary")
@@ -577,10 +758,9 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
 
     def _refresh_list(self, text: str) -> None:
         self._current_matches = self._filtered(text)
-        lv = self.query_one("#suggestion-list", ListView)
-        lv.clear()
-        for kw in self._current_matches:
-            lv.append(ListItem(Label(kw)))
+        suggestions = self.query_one("#suggestion-list", KeywordList)
+        suggestions.clear_options()
+        suggestions.add_options(self._current_matches)
 
     def _dismiss_from_input(self) -> None:
         text = self.query_one("#kw-input", Input).value.strip()
@@ -598,21 +778,21 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._dismiss_from_input()
 
-    def on_key(self, event) -> None:
-        if event.key == "down":
-            self.query_one("#suggestion-list", ListView).focus()
-            event.prevent_default()
-        elif event.key == "up":
-            lv = self.query_one("#suggestion-list", ListView)
-            if lv.index == 0:
-                self.query_one("#kw-input", Input).focus()
-                event.prevent_default()
+    def action_focus_suggestions(self) -> None:
+        # Reached via the screen's "down" binding, i.e. only when the focused
+        # widget (the filter input) doesn't handle Down itself.
+        suggestions = self.query_one("#suggestion-list", KeywordList)
+        if suggestions.option_count:
+            suggestions.focus()
+            if suggestions.highlighted is None:
+                suggestions.highlighted = 0
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        lv = self.query_one("#suggestion-list", ListView)
-        idx = lv.index
-        if idx is not None and 0 <= idx < len(self._current_matches):
-            self.dismiss(self._current_matches[idx])
+    def on_keyword_list_at_top(self, event: KeywordList.AtTop) -> None:
+        self.query_one("#kw-input", Input).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self._current_matches):
+            self.dismiss(self._current_matches[event.option_index])
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "add-kw":
@@ -645,16 +825,40 @@ class ParamRow(Widget):
         yield Input(self._val, placeholder="Value", classes="param-val")
         yield Button("×", classes="param-del")
 
+    def load(self, key: str, value: str) -> None:
+        """Show a different key/value in this row, reusing its widgets.
+
+        Building a row's widgets is the main cost of switching hosts, so the
+        editor reuses rows rather than remounting them.  Input.Changed is
+        suppressed: this is a display change, not an edit.
+        """
+        self._key, self._val = key, value
+        # Before compose there are no Inputs yet; compose() reads the fields.
+        for inp in self.query(Input):
+            with inp.prevent(Input.Changed):
+                inp.value = key if inp.has_class("param-key") else value
+            inp.cursor_position = len(inp.value)
+
     @property
     def key(self) -> str:
-        return self.query_one(".param-key", Input).value
+        return self._key
 
     @property
     def value(self) -> str:
-        return self.query_one(".param-val", Input).value
+        return self._val
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
+        # Ignore stale events: a Changed queued before load() reused this row
+        # for another host carries the previous host's value.  A real edit
+        # always matches the input's current value (or is followed by a newer
+        # event that does).
+        if event.value != event.input.value:
+            return
+        if event.input.has_class("param-key"):
+            self._key = event.value
+        else:
+            self._val = event.value
         self.post_message(self.Changed())
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -665,11 +869,15 @@ class ParamRow(Widget):
 # ─── Widgets (continued) ──────────────────────────────────────────────────────
 
 
-class HostListView(ListView):
-    """ListView with vim-style j/k navigation."""
+class HostList(NoWrapOptionList):
+    """Host list with vim-style j/k navigation.
+
+    An OptionList renders its rows as lines rather than one widget per
+    entry, so its cost doesn't grow with the number of hosts.
+    """
 
     BINDINGS = [
-        *ListView.BINDINGS,
+        *OptionList.BINDINGS,
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
     ]
@@ -697,8 +905,11 @@ class SSHConfigApp(App[None]):
         self._config = SSHConfig(path=config_path)
         self._current_entry: Optional[HostEntry] = None
         self._modified = False
-        self._loading = False        # guard against spurious Highlighted events
-        self._loading_entry = False  # guard against Input.Changed fired on mount
+        # "Validate config with SSH?" choice; None until first set this session.
+        self._validate_with_ssh: Optional[bool] = None
+        # Rows of the entry being edited, in order.  Tracked explicitly rather
+        # than queried from the DOM, where removed rows linger until pruned.
+        self._rows: list[ParamRow] = []
 
     # ── Composition ──────────────────────────────────────────────────────────
 
@@ -707,7 +918,7 @@ class SSHConfigApp(App[None]):
         with Horizontal(id="main"):
             with Vertical(id="sidebar"):
                 yield Static("HOSTS", classes="pane-title")
-                yield HostListView(id="host-list")
+                yield HostList(id="host-list")
                 with Horizontal(id="sidebar-actions"):
                     yield Button("New Host", id="btn-new")
                     yield Button("Edit Host", id="btn-edit-host")
@@ -729,7 +940,6 @@ class SSHConfigApp(App[None]):
     # ── Config I/O ───────────────────────────────────────────────────────────
 
     def _load_config(self, path: Path) -> None:
-        self._loading = True
         self._config_path = path
 
         if not path.exists():
@@ -740,29 +950,43 @@ class SSHConfigApp(App[None]):
 
         self._current_entry = None
         self._modified = False
-        self._rebuild_list()
         self._update_title()
         self._show_empty()
-        self._loading = False
+        self._rebuild_list(select=0)
 
-        # Select first entry if any
-        if self._config.entries:
-            lv = self.query_one("#host-list", HostListView)
-            lv.index = 0
+    def _rebuild_list(self, select: Optional[int] = None) -> None:
+        """Repopulate the host list, then select entry *select* (clamped)."""
+        host_list = self.query_one("#host-list", HostList)
+        host_list.clear_options()
+        host_list.add_options(Option(self._entry_label(e)) for e in self._config.entries)
+        if select is not None and self._config.entries:
+            self._select(min(max(select, 0), len(self._config.entries) - 1))
 
-    def _rebuild_list(self) -> None:
-        lv = self.query_one("#host-list", HostListView)
-        lv.clear()
-        for entry in self._config.entries:
-            lv.append(ListItem(Label(entry.pattern)))
+    def _select(self, index: int) -> None:
+        """Highlight entry *index* in the list and show it in the editor."""
+        host_list = self.query_one("#host-list", HostList)
+        if host_list.highlighted != index:
+            host_list.highlighted = index
+        entry = self._config.entries[index]
+        if entry is not self._current_entry:
+            self._sync_params_to_entry()
+            self._load_entry(entry)
+
+    @staticmethod
+    def _entry_label(entry: HostEntry) -> Text:
+        # Text, not str: patterns and Match criteria must not be parsed as markup.
+        return Text(entry.pattern if entry.kind == "Host" else f"{entry.kind} {entry.pattern}")
 
     def _update_title(self) -> None:
         mod = " (unsaved)" if self._modified else ""
         self.sub_title = f"{self._config_path}{mod}"
 
-    def _mark_modified(self) -> None:
-        if not self._modified:
-            self._modified = True
+    def _refresh_modified(self) -> None:
+        """Derive the unsaved flag from content: modified means the file as it
+        would be written differs from what was last loaded or saved."""
+        modified = self._config.is_modified()
+        if modified != self._modified:
+            self._modified = modified
             self._update_title()
 
     # ── Editor ───────────────────────────────────────────────────────────────
@@ -771,32 +995,38 @@ class SSHConfigApp(App[None]):
         self.query_one("#empty-msg").display = True
         self.query_one("#add-field").display = False
         self.query_one("#editor-header", Static).update("")
-        for row in self.query(ParamRow):
+        self._clear_rows()
+
+    def _clear_rows(self) -> None:
+        for row in self._rows:
             row.remove()
+        self._rows = []
 
     def _load_entry(self, entry: HostEntry) -> None:
-        self._loading_entry = True
         self._current_entry = entry
-        self.query_one("#editor-header", Static).update(f"  Host {entry.pattern}")
-        for row in self.query(ParamRow):
-            row.remove()
+        self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
         self.query_one("#empty-msg").display = False
-        self.query_one("#add-field").display = True
         add_btn = self.query_one("#add-field")
-        for key, value in entry.params:
-            add_btn.parent.mount(ParamRow(key, value), before=add_btn)
-        self.call_after_refresh(
-            lambda: self.call_after_refresh(
-                lambda: setattr(self, "_loading_entry", False)
-            )
-        )
+        add_btn.display = True
+        # Reuse existing rows; only mount or remove the difference in count.
+        params = entry.params
+        reused, surplus = self._rows[: len(params)], self._rows[len(params):]
+        for row in surplus:
+            row.remove()
+        for row, (key, value) in zip(reused, params):
+            row.load(key, value)
+        added = [ParamRow(key, value) for key, value in params[len(reused):]]
+        if added:
+            add_btn.parent.mount_all(added, before=add_btn)
+        self._rows = reused + added
+        self.query_one("#params-scroll").scroll_home(animate=False)
 
     def _sync_params_to_entry(self) -> None:
         if self._current_entry is None:
             return
         params = [
             (row.key.strip(), row.value.strip())
-            for row in self.query(ParamRow)
+            for row in self._rows
             if row.key.strip()
         ]
         self._current_entry.params = params
@@ -816,28 +1046,26 @@ class SSHConfigApp(App[None]):
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
-    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
-        if self._loading or event.item is None:
-            return
-        lv = self.query_one("#host-list", HostListView)
-        idx = lv.index
-        if idx is None or idx >= len(self._config.entries):
-            return
-        new_entry = self._config.entries[idx]
-        if new_entry is self._current_entry:
-            return
-        self._sync_params_to_entry()
-        self._load_entry(new_entry)
+    # Only the host list: highlights in other OptionLists (e.g. the keyword
+    # picker's suggestions) bubble up to the app too.
+    @on(OptionList.OptionHighlighted, "#host-list")
+    def host_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        # Read the list's current state rather than the event's index: the
+        # list may have been rebuilt since this message was posted.
+        idx = self.query_one("#host-list", HostList).highlighted
+        if idx is not None and idx < len(self._config.entries):
+            self._select(idx)
 
     def on_param_row_changed(self, event: ParamRow.Changed) -> None:
         self._sync_params_to_entry()
-        if not self._loading_entry:
-            self._mark_modified()
+        self._refresh_modified()
 
     def on_param_row_delete_requested(self, event: ParamRow.DeleteRequested) -> None:
+        if event.row in self._rows:
+            self._rows.remove(event.row)
         event.row.remove()
         self._sync_params_to_entry()
-        self._mark_modified()
+        self._refresh_modified()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
@@ -857,21 +1085,16 @@ class SSHConfigApp(App[None]):
     # ── Actions ──────────────────────────────────────────────────────────────
 
     def action_focus_list(self) -> None:
-        self.query_one("#host-list", HostListView).focus()
+        self.query_one("#host-list", HostList).focus()
 
     def action_new_host(self) -> None:
         def on_result(pattern: Optional[str]) -> None:
             if not pattern:
                 return
             self._sync_params_to_entry()
-            entry = self._config.add_entry(pattern)
-            self._loading = True
-            self._rebuild_list()
-            self._loading = False
-            self._load_entry(entry)
-            lv = self.query_one("#host-list", HostListView)
-            lv.index = len(self._config.entries) - 1
-            self._mark_modified()
+            self._config.add_entry(pattern)
+            self._rebuild_list(select=len(self._config.entries) - 1)
+            self._refresh_modified()
 
         self.push_screen(
             InputScreen("Host pattern (e.g. myserver, bastion, *.corp)", "New Host Entry"),
@@ -888,15 +1111,11 @@ class SSHConfigApp(App[None]):
             if not new_pattern:
                 return
             entry.pattern = new_pattern
-            lv = self.query_one("#host-list", HostListView)
-            current_idx = lv.index
-            self._loading = True
-            self._rebuild_list()
-            self._loading = False
-            self.query_one("#editor-header", Static).update(f"  Host {entry.pattern}")
-            if current_idx is not None:
-                lv.index = current_idx
-            self._mark_modified()
+            self.query_one("#host-list", HostList).replace_option_prompt_at_index(
+                self._config.entries.index(entry), self._entry_label(entry)
+            )
+            self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
+            self._refresh_modified()
 
         self.push_screen(
             InputScreen(
@@ -918,17 +1137,16 @@ class SSHConfigApp(App[None]):
             if not confirmed:
                 return
             entry_to_remove = self._current_entry
+            removed_at = self._config.entries.index(entry_to_remove)
             self._current_entry = None
             self._config.remove_entry(entry_to_remove)
-            self._loading = True
-            self._rebuild_list()
-            self._loading = False
-            self._mark_modified()
+            self._refresh_modified()
             if self._config.entries:
-                lv = self.query_one("#host-list", HostListView)
-                lv.index = 0
-                self._load_entry(self._config.entries[0])
+                # Stay at the same position: select the next host (or the
+                # new last one) rather than jumping to the top.
+                self._rebuild_list(select=removed_at)
             else:
+                self._rebuild_list()
                 self._show_empty()
 
         self.push_screen(
@@ -936,36 +1154,135 @@ class SSHConfigApp(App[None]):
             on_result,
         )
 
+    # ── Saving ───────────────────────────────────────────────────────────────
+
+    def _ssh_validate_option(self) -> tuple[bool, bool]:
+        """(initial checkbox value, ssh available) for Save/Quit dialogs.
+
+        The checkbox starts checked when ssh is installed, then remembers the
+        last choice for the rest of the session.
+        """
+        available = ssh_validate.find_ssh() is not None
+        if not available:
+            return False, False
+        return (True if self._validate_with_ssh is None else self._validate_with_ssh), True
+
+    def _remember_ssh_validate(self, screen: SaveScreen | UnsavedChangesScreen) -> None:
+        if screen.ssh_available:
+            self._validate_with_ssh = screen.validate
+
     def action_save(self) -> None:
+        validate, available = self._ssh_validate_option()
+        screen = SaveScreen(self._config_path, validate, available)
+
+        def on_result(save: bool) -> None:
+            self._remember_ssh_validate(screen)
+            if save:
+                self._save(validate=screen.validate)
+
+        self.push_screen(screen, on_result)
+
+    def _save(
+        self, on_success: Optional[Callable[[], None]] = None, validate: bool = False
+    ) -> None:
+        """Check and write the config; call *on_success* only if it was written.
+
+        Built-in validation errors, a failed ssh validation (unless the user
+        continues anyway), write errors and declining to overwrite an external
+        change all leave *on_success* uncalled.
+        """
         self._sync_params_to_entry()
         errors = self._validate()
         if errors:
             self.notify("\n".join(errors), title="Validation error", severity="error", timeout=6)
             return
+        if validate:
+            self._ssh_validate_then_write(on_success)
+        else:
+            self._write_config(on_success=on_success)
+
+    @work(exclusive=True, group="ssh-validate")
+    async def _ssh_validate_then_write(self, on_success: Optional[Callable[[], None]]) -> None:
+        result = await ssh_validate.validate_with_ssh(self._config)
+        if result.ok:
+            self.notify("✔️ Validated", timeout=2)
+            self._write_config(on_success=on_success)
+            return
+
+        def on_choice(choice: Optional[str]) -> None:
+            if choice == "continue":
+                self._write_config(on_success=on_success)
+            elif choice == "show":
+                self.push_screen(ValidationErrorScreen(result.output))
+
+        self.push_screen(ValidationFailedScreen(), on_choice)
+
+    def _write_config(
+        self, force: bool = False, on_success: Optional[Callable[[], None]] = None
+    ) -> None:
         try:
-            self._config.save()
-            self._modified = False
-            self._update_title()
-            self.notify("Saved.", title="sshconfigmgr", timeout=2)
+            self._config.save(force=force)
+        except ConfigChangedError:
+            def on_result(confirmed: bool) -> None:
+                if confirmed:
+                    self._write_config(force=True, on_success=on_success)
+
+            self.push_screen(
+                ConfirmScreen(
+                    f"{self._config_path} was modified by another program since it "
+                    "was opened. Overwrite those changes?",
+                    "File Changed on Disk",
+                ),
+                on_result,
+            )
+            return
         except OSError as exc:
             self.notify(str(exc), title="Save failed", severity="error")
+            return
+        self._refresh_modified()
+        self.notify("Saved.", title="sshconfigmgr", timeout=2)
+        if on_success is not None:
+            on_success()
+
+    def _confirm_leave(self, action: str, proceed: Callable[[], None]) -> None:
+        """Run *proceed* now if there are no unsaved changes, otherwise only
+        after the user chooses to save (successfully) or discard them."""
+        if not self._modified:
+            proceed()
+            return
+
+        validate, available = self._ssh_validate_option()
+        screen = UnsavedChangesScreen(action, validate, available)
+
+        def on_result(choice: Optional[str]) -> None:
+            self._remember_ssh_validate(screen)
+            if choice == "save":
+                self._save(on_success=proceed, validate=screen.validate)
+            elif choice == "discard":
+                proceed()
+
+        self.push_screen(screen, on_result)
 
     def action_open_file(self) -> None:
         def on_path(path_str: Optional[str]) -> None:
             if not path_str:
                 return
             path = Path(path_str).expanduser().resolve()
+
+            def load() -> None:
+                self._confirm_leave("Open", lambda: self._load_config(path))
+
             if not path.exists():
                 def on_create(confirmed: bool) -> None:
                     if confirmed:
-                        self._load_config(path)
+                        load()
 
                 self.push_screen(
                     ConfirmScreen(f"File not found. Create {path}?", "Open File"),
                     on_create,
                 )
             else:
-                self._load_config(path)
+                load()
 
         self.push_screen(
             InputScreen("File path", "Open SSH Config", str(self._config_path)),
@@ -973,31 +1290,22 @@ class SSHConfigApp(App[None]):
         )
 
     def action_request_quit(self) -> None:
-        if not self._modified:
-            self.exit()
-            return
-
-        def on_result(choice: Optional[str]) -> None:
-            if choice == "save":
-                self.action_save()
-                self.exit()
-            elif choice == "discard":
-                self.exit()
-
-        self.push_screen(QuitConfirmScreen(), on_result)
+        self._confirm_leave("Quit", self.exit)
 
     def _do_add_field(self) -> None:
         if self._current_entry is None:
             return
-        existing_keys = [row.key for row in self.query(ParamRow)]
+        existing_keys = [row.key for row in self._rows]
 
         def on_keyword(keyword: Optional[str]) -> None:
             if not keyword:
                 return
             add_btn = self.query_one("#add-field")
             row = ParamRow(keyword, "")
+            self._rows.append(row)
             add_btn.parent.mount(row, before=add_btn)
             self.call_after_refresh(lambda: row.query_one(".param-val", Input).focus())
-            self._mark_modified()
+            self._sync_params_to_entry()
+            self._refresh_modified()
 
         self.push_screen(AddFieldScreen(existing_keys), on_keyword)

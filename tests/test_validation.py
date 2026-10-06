@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sshconfigmgr.ssh_config import HostEntry, SSHConfig
+from sshconfigmgr.ssh_config import SSHConfig
 
 
 # ─── Helper: replicate app._validate() logic without the TUI ──────────────────
