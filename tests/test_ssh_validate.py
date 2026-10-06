@@ -110,3 +110,28 @@ def test_real_ssh_rejects_bad_keyword_and_port(tmp_path: Path) -> None:
     assert not result.ok
     assert f"{tmp_path / 'config'}: line 2: Bad configuration option: prot" in result.output
     assert "line 5: Bad port '99999'" in result.output
+
+
+def test_windows_escaped_temp_path_is_replaced() -> None:
+    """Windows OpenSSH prints paths with doubled backslashes (seen in CI)."""
+    from sshconfigmgr.ssh_validate import _report_real_path
+
+    tmp = r"C:\Users\RUNNER~1\AppData\Local\Temp\sshconfigmgr-23be1p23.conf"
+    escaped = tmp.replace("\\", "\\\\")
+    output = (
+        f"{escaped}: line 2: Bad configuration option: prot\n"
+        f"{escaped}: terminating, 1 bad configuration options\n"
+    )
+    real = Path(r"C:\Users\me\.ssh\config")
+    assert _report_real_path(output, tmp, real) == (
+        f"{real}: line 2: Bad configuration option: prot\n"
+        f"{real}: terminating, 1 bad configuration options\n"
+    )
+
+
+def test_plain_temp_path_is_replaced() -> None:
+    from sshconfigmgr.ssh_validate import _report_real_path
+
+    assert _report_real_path("/tmp/x.conf line 3: Bad port", "/tmp/x.conf", Path("/home/me/.ssh/config")) == (
+        "/home/me/.ssh/config line 3: Bad port"
+    )

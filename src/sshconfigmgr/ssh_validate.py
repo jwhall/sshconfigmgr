@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Sequence
 
 from sshconfigmgr.ssh_config import SSHConfig
@@ -31,6 +32,17 @@ TIMEOUT_SECONDS = 10.0
 class ValidationResult:
     ok: bool
     output: str
+
+
+def _report_real_path(output: str, tmp: str, real: Path) -> str:
+    """Name the user's config in ssh's messages instead of the temporary copy.
+
+    Windows OpenSSH escapes backslashes when it prints a path
+    ("C:\\\\Users\\\\..."), so replace that form as well as the plain one.
+    """
+    for form in (tmp.replace("\\", "\\\\"), tmp):
+        output = output.replace(form, str(real))
+    return output
 
 
 def find_ssh() -> Optional[str]:
@@ -83,8 +95,7 @@ async def validate_with_ssh(
         except OSError:
             pass
 
-    # Report errors against the real file name, not the temporary copy.
-    output = stderr.decode("utf-8", errors="replace").replace(tmp, str(config.path)).strip()
+    output = _report_real_path(stderr.decode("utf-8", errors="replace"), tmp, config.path).strip()
     if proc.returncode == 0:
         return ValidationResult(True, output)
     return ValidationResult(False, output or f"ssh exited with status {proc.returncode}.")

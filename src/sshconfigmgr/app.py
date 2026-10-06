@@ -849,6 +849,12 @@ class ParamRow(Widget):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
+        # Ignore stale events: a Changed queued before load() reused this row
+        # for another host carries the previous host's value.  A real edit
+        # always matches the input's current value (or is followed by a newer
+        # event that does).
+        if event.value != event.input.value:
+            return
         if event.input.has_class("param-key"):
             self._key = event.value
         else:

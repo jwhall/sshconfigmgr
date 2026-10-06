@@ -4,11 +4,14 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from time import monotonic
 from typing import Awaitable, Callable
 
 import pytest
 
 from textual.pilot import Pilot
+from textual.message import Message
+from textual.message_pump import MessagePump
 from textual.widgets import Input
 
 from sshconfigmgr.app import (
@@ -32,12 +35,54 @@ ORIGINAL = "Host a\n    Port 22\n"
 OTHER = "Host other\n    User o\n"
 
 
+# Messages currently being handled, across all message pumps; maintained by
+# the track_dispatch fixture and read by settle().
+_IN_FLIGHT = [0]
+
+
+@pytest.fixture(autouse=True)
+def track_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = MessagePump._dispatch_message
+
+    async def tracked(self: MessagePump, message: Message) -> object:
+        _IN_FLIGHT[0] += 1
+        try:
+            return await original(self, message)
+        finally:
+            _IN_FLIGHT[0] -= 1
+
+    monkeypatch.setattr(MessagePump, "_dispatch_message", tracked)
+
+
+async def settle(pilot: Pilot, timeout: float = 10.0) -> None:
+    """Wait until the app has finished processing everything in flight.
+
+    Pilot.pause() decides the app is idle from CPU time, so on slow or
+    coarse-timer runners (Windows CI) it can return while messages are still
+    queued or being handled.  This waits until no message is being handled,
+    every message queue in the app is empty, and any workers have finished,
+    on two consecutive checks.
+    """
+    app = pilot.app
+    deadline = monotonic() + timeout
+    quiet = 0
+    while quiet < 2 and app.is_running:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        pumps = [app]
+        for screen in app.screen_stack:
+            pumps.extend(screen.walk_children(with_self=True))
+        busy = _IN_FLIGHT[0] > 0 or any(not pump._message_queue.empty() for pump in pumps)
+        quiet = 0 if busy else quiet + 1
+        assert monotonic() < deadline, "app did not settle"
+
+
 def run(path: Path, script: Callable[[SSHConfigApp, Pilot], Awaitable[None]]) -> SSHConfigApp:
     app = SSHConfigApp(path.resolve())
 
     async def main() -> None:
         async with app.run_test() as pilot:
-            await pilot.pause()
+            await settle(pilot)
             await script(app, pilot)
 
     asyncio.run(main())
@@ -46,18 +91,18 @@ def run(path: Path, script: Callable[[SSHConfigApp, Pilot], Awaitable[None]]) ->
 
 async def set_port(app: SSHConfigApp, pilot: Pilot, value: str) -> None:
     app.query(ParamRow).first().query_one(".param-val", Input).value = value
-    await pilot.pause()
+    await settle(pilot)
     assert app._modified
 
 
 async def choose(pilot: Pilot, button_id: str) -> None:
     await pilot.click(f"#{button_id}")
-    await pilot.pause()
+    await settle(pilot)
 
 
 async def open_path(app: SSHConfigApp, pilot: Pilot, path: Path) -> None:
     app.action_open_file()
-    await pilot.pause()
+    await settle(pilot)
     assert isinstance(app.screen, InputScreen)
     app.screen.query_one("#dialog-input", Input).value = str(path)
     await choose(pilot, "ok")
@@ -72,7 +117,7 @@ def test_save_and_quit_with_validation_error_does_not_quit(tmp_config: Path) -> 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "99999")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         assert isinstance(app.screen, UnsavedChangesScreen)
         await choose(pilot, "save")
         assert app.is_running
@@ -88,7 +133,7 @@ def test_save_and_quit_saves_then_quits(tmp_config: Path) -> None:
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "save")
         assert not app.is_running
 
@@ -104,7 +149,7 @@ def test_save_and_quit_declining_overwrite_does_not_quit(tmp_config: Path) -> No
         tmp_config.write_text(OTHER)
         os.utime(tmp_config, ns=(0, 0))
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "save")
         assert isinstance(app.screen, ConfirmScreen)
         await choose(pilot, "cancel")
@@ -123,7 +168,7 @@ def test_save_and_quit_accepting_overwrite_quits(tmp_config: Path) -> None:
         tmp_config.write_text(OTHER)
         os.utime(tmp_config, ns=(0, 0))
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "save")
         await choose(pilot, "ok")
         assert not app.is_running
@@ -138,7 +183,7 @@ def test_discard_and_quit_leaves_file_untouched(tmp_config: Path) -> None:
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "discard")
         assert not app.is_running
 
@@ -152,7 +197,7 @@ def test_cancel_quit_keeps_editing(tmp_config: Path) -> None:
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "cancel")
         assert app.is_running
         assert app._modified
@@ -265,11 +310,11 @@ def test_startup_and_navigation_do_not_set_modified(tmp_config: Path) -> None:
     tmp_config.write_text(MULTI)
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
-        await pilot.pause()
+        await settle(pilot)
         assert not app._modified
         for key in "jjkjj":
             await pilot.press(key)
-            await pilot.pause()
+            await settle(pilot)
             assert not app._modified, f"modified after pressing {key}"
         assert "(unsaved)" not in app.sub_title
 
@@ -291,7 +336,7 @@ def test_edit_then_revert_clears_modified(tmp_config: Path) -> None:
 
 async def set_port_unchecked(app: SSHConfigApp, pilot: Pilot, value: str) -> None:
     app.query(ParamRow).first().query_one(".param-val", Input).value = value
-    await pilot.pause()
+    await settle(pilot)
 
 
 def test_deleting_a_field_sets_modified_and_updates_model(tmp_config: Path) -> None:
@@ -300,7 +345,7 @@ def test_deleting_a_field_sets_modified_and_updates_model(tmp_config: Path) -> N
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         row = app.query(ParamRow).last()
         row.post_message(ParamRow.DeleteRequested(row))
-        await pilot.pause()
+        await settle(pilot)
         assert app._modified
         assert app._config.entries[0].params == [("User", "x")]
 
@@ -312,12 +357,12 @@ def test_adding_a_field_sets_modified(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         app._do_add_field()
-        await pilot.pause()
+        await settle(pilot)
         await pilot.press(*"ForwardAgent", "enter")
-        await pilot.pause()
+        await settle(pilot)
         assert app._modified
         await pilot.press(*"yes")
-        await pilot.pause()
+        await settle(pilot)
         assert app._config.entries[0].get("ForwardAgent") == "yes"
 
     run(tmp_config, script)
@@ -328,7 +373,7 @@ def test_host_level_edits_set_modified(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         app.action_delete_host()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "ok")
         assert app._modified
 
@@ -371,7 +416,7 @@ def test_editor_shows_each_entry_while_navigating(tmp_config: Path) -> None:
         for expected in (1, 2, 3, 4, 3, 2, 1, 0):
             key = "j" if expected > app._config.entries.index(app._current_entry) else "k"
             await pilot.press(key)
-            await pilot.pause()
+            await settle(pilot)
             entry = app._config.entries[expected]
             assert app._current_entry is entry
             assert shown_params(app) == entry.params, entry.pattern
@@ -384,7 +429,7 @@ def test_editor_consistent_after_key_burst(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await pilot.press(*"jjjjkjjkkj")  # no pause between keys
-        await pilot.pause()
+        await settle(pilot)
         entry = app._config.entries[3]
         assert app._current_entry is entry
         assert shown_params(app) == entry.params
@@ -399,9 +444,9 @@ def test_edit_after_navigation_goes_to_the_right_entry(tmp_config: Path) -> None
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         for _ in range(3):  # zero -> three -> one -> five (rows reused)
             await pilot.press("j")
-            await pilot.pause()
+            await settle(pilot)
         app.query(ParamRow).first().query(Input).last().value = "changed"
-        await pilot.pause()
+        await settle(pilot)
         five, others = app._config.entries[3], app._config.entries[:3]
         assert five.get("SetEnv") == "changed"
         original = SSHConfig.from_path(tmp_config).entries[:3]
@@ -424,9 +469,9 @@ def test_rename_updates_list_label(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await pilot.press("j")
-        await pilot.pause()
+        await settle(pilot)
         app.action_edit_host()
-        await pilot.pause()
+        await settle(pilot)
         app.screen.query_one("#dialog-input", Input).value = "three tres"
         await choose(pilot, "ok")
         assert host_list_labels(app)[1] == "three tres"
@@ -440,9 +485,9 @@ def test_delete_selects_the_next_host(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await pilot.press("j", "j")
-        await pilot.pause()
+        await settle(pilot)
         app.action_delete_host()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "ok")
         assert host_list_labels(app) == ["zero", "three", "five", "two"]
         assert app._current_entry.pattern == "five"
@@ -456,9 +501,9 @@ def test_delete_last_host_selects_new_last(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await pilot.press("end")
-        await pilot.pause()
+        await settle(pilot)
         app.action_delete_host()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "ok")
         assert app._current_entry.pattern == "five"
 
@@ -470,7 +515,7 @@ def test_new_host_is_selected(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         app.action_new_host()
-        await pilot.pause()
+        await settle(pilot)
         app.screen.query_one("#dialog-input", Input).value = "fresh"
         await choose(pilot, "ok")
         assert host_list_labels(app)[-1] == "fresh"
@@ -499,10 +544,10 @@ def test_cursor_stops_at_list_ends(tmp_config: Path) -> None:
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await pilot.press("k")
-        await pilot.pause()
+        await settle(pilot)
         assert app._current_entry.pattern == "zero"
         await pilot.press("end", "j", "down")
-        await pilot.pause()
+        await settle(pilot)
         assert app._current_entry.pattern == "two"
 
     run(tmp_config, script)
@@ -515,7 +560,7 @@ async def open_picker(app: SSHConfigApp, pilot: Pilot):
     from sshconfigmgr.app import AddFieldScreen
 
     app._do_add_field()
-    await pilot.pause()
+    await settle(pilot)
     assert isinstance(app.screen, AddFieldScreen)
     return app.screen
 
@@ -533,7 +578,7 @@ def test_picker_filters_and_hides_used_single_keywords(tmp_config: Path) -> None
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         screen = await open_picker(app, pilot)
         await pilot.press(*"Lo")
-        await pilot.pause()
+        await settle(pilot)
         # LogLevel is single-use and already present; LocalForward may repeat.
         assert suggestions(screen) == ["LocalCommand", "LocalForward", "LogVerbose"]
 
@@ -549,17 +594,17 @@ def test_picker_keyboard_navigation(tmp_config: Path) -> None:
         screen = await open_picker(app, pilot)
         await pilot.press(*"Loc")
         await pilot.press("down")
-        await pilot.pause()
+        await settle(pilot)
         kl = screen.query_one(KeywordList)
         assert screen.focused is kl and kl.highlighted == 0
         await pilot.press("down", "down", "down")  # stops at the last option
-        await pilot.pause()
+        await settle(pilot)
         assert kl.highlighted == 1
         await pilot.press("up", "up")  # past the top returns to the input
-        await pilot.pause()
+        await settle(pilot)
         assert screen.focused is screen.query_one("#kw-input", Input)
         await pilot.press("down", "down", "enter")
-        await pilot.pause()
+        await settle(pilot)
         assert app._current_entry.params == [("LocalForward", "")]
 
     run(tmp_config, script)
@@ -571,10 +616,10 @@ def test_picker_enter_in_input_uses_canonical_case_or_free_text(tmp_config: Path
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await open_picker(app, pilot)
         await pilot.press(*"proxyjump", "enter")
-        await pilot.pause()
+        await settle(pilot)
         await open_picker(app, pilot)
         await pilot.press(*"XCustomThing", "enter")
-        await pilot.pause()
+        await settle(pilot)
         assert [k for k, _ in app._current_entry.params] == ["ProxyJump", "XCustomThing"]
 
     run(tmp_config, script)
@@ -588,10 +633,10 @@ def test_picker_click_selects(tmp_config: Path) -> None:
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         screen = await open_picker(app, pilot)
         await pilot.press(*"Port")
-        await pilot.pause()
+        await settle(pilot)
         assert suggestions(screen) == ["Port"]
         await pilot.click(KeywordList, offset=(3, 1))
-        await pilot.pause()
+        await settle(pilot)
         assert app._current_entry.params == [("Port", "")]
 
     run(tmp_config, script)
@@ -603,7 +648,7 @@ def test_picker_escape_cancels(tmp_config: Path) -> None:
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await open_picker(app, pilot)
         await pilot.press(*"Port", "escape")
-        await pilot.pause()
+        await settle(pilot)
         assert app._current_entry.params == []
         assert not app._modified
 
@@ -649,7 +694,7 @@ def checkbox(app: SSHConfigApp) -> Checkbox:
 
 async def open_save(app: SSHConfigApp, pilot: Pilot) -> None:
     await pilot.press("ctrl+s")
-    await pilot.pause()
+    await settle(pilot)
     assert isinstance(app.screen, SaveScreen)
 
 
@@ -673,7 +718,7 @@ def test_save_dialog_enter_saves(tmp_config: Path) -> None:
         await set_port(app, pilot, "2222")
         await open_save(app, pilot)
         await pilot.press("enter")
-        await pilot.pause()
+        await settle(pilot)
         assert not app._modified
 
     run(tmp_config, script)
@@ -701,7 +746,7 @@ def test_checkbox_defaults_on_and_is_remembered(
         await open_save(app, pilot)
         assert checkbox(app).value and not checkbox(app).disabled
         await pilot.click("#validate-ssh")
-        await pilot.pause()
+        await settle(pilot)
         assert not checkbox(app).value
         await choose(pilot, "cancel")
         # Remembered in the next Save dialog ...
@@ -712,7 +757,7 @@ def test_checkbox_defaults_on_and_is_remembered(
         # ... and shared with the Quit dialog.
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         assert isinstance(app.screen, UnsavedChangesScreen)
         assert checkbox(app).value
 
@@ -736,13 +781,15 @@ def test_unchecked_save_skips_validation(tmp_config: Path, fake_validation: Fake
 def test_validation_success_shows_message_and_saves(
     tmp_config: Path, fake_validation: FakeValidation
 ) -> None:
-    tmp_config.write_text(ORIGINAL)
+    # Bytes, not write_text(): this test compares the exact text validated,
+    # and write_text() would give the file \r\n line endings on Windows.
+    tmp_config.write_bytes(ORIGINAL.encode())
 
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         await open_save(app, pilot)
         await choose(pilot, "save")
-        await pilot.pause()
+        await settle(pilot)
         assert "✔️ Validated" in notifications(app)
         assert not app._modified
 
@@ -761,7 +808,7 @@ def test_validation_failure_continue_anyway_saves(
         await set_port(app, pilot, "2222")
         await open_save(app, pilot)
         await choose(pilot, "save")
-        await pilot.pause()
+        await settle(pilot)
         assert isinstance(app.screen, ValidationFailedScreen)
         await choose(pilot, "continue")
         assert not app._modified
@@ -781,7 +828,7 @@ def test_validation_failure_show_error_then_close_returns_to_editor(
         await set_port(app, pilot, "2222")
         await open_save(app, pilot)
         await choose(pilot, "save")
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "show")
         assert isinstance(app.screen, ValidationErrorScreen)
         shown = str(app.screen.query_one("#validation-output Static", Static).render())
@@ -805,9 +852,9 @@ def test_validation_failure_escape_returns_to_editor(
         await set_port(app, pilot, "2222")
         await open_save(app, pilot)
         await choose(pilot, "save")
-        await pilot.pause()
+        await settle(pilot)
         await pilot.press("escape")
-        await pilot.pause()
+        await settle(pilot)
         assert app.screen is app.screen_stack[0]
 
     run(tmp_config, script)
@@ -822,9 +869,9 @@ def test_quit_validation_success_saves_and_quits(
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "save")
-        await pilot.pause()
+        await settle(pilot)
         assert not app.is_running
 
     run(tmp_config, script)
@@ -841,9 +888,9 @@ def test_quit_validation_failure_show_error_stays_open(
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "save")
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "show")
         await choose(pilot, "close")
         assert app.is_running
@@ -862,9 +909,9 @@ def test_quit_validation_failure_continue_anyway_saves_and_quits(
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "save")
-        await pilot.pause()
+        await settle(pilot)
         await choose(pilot, "continue")
         assert not app.is_running
 
@@ -878,7 +925,7 @@ def test_quit_unchecked_does_not_validate(tmp_config: Path, fake_validation: Fak
     async def script(app: SSHConfigApp, pilot: Pilot) -> None:
         await set_port(app, pilot, "2222")
         app.action_request_quit()
-        await pilot.pause()
+        await settle(pilot)
         await pilot.click("#validate-ssh")
         await choose(pilot, "save")
         assert not app.is_running
@@ -898,7 +945,27 @@ def test_picker_highlights_do_not_reach_host_selection(tmp_config: Path) -> None
         app._select = lambda index: (selected.append(index), original(index))[1]
         await open_picker(app, pilot)
         await pilot.press(*"Pro", "down", "down", "up")
-        await pilot.pause()
+        await settle(pilot)
         assert selected == []
+
+    run(tmp_config, script)
+
+
+def test_stale_input_event_after_row_reuse_is_ignored(tmp_config: Path) -> None:
+    """A Changed event queued before a row was reused for another host must
+    not write the old host's value into the new host (seen with fast
+    navigation on a slow runner)."""
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await pilot.press("j", "j")  # zero -> three -> one: rows reused
+        await settle(pilot)
+        key_input = app.query(ParamRow).first().query(Input).first()
+        assert key_input.value == "User"
+        # Simulate the queued event from when this row showed Host three.
+        key_input.post_message(Input.Changed(key_input, "Port"))
+        await settle(pilot)
+        assert app._config.entries[2].params == [("User", "u1")]
+        assert not app._modified
 
     run(tmp_config, script)
