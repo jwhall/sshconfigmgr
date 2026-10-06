@@ -132,6 +132,7 @@ def test_windows_escaped_temp_path_is_replaced() -> None:
 def test_plain_temp_path_is_replaced() -> None:
     from sshconfigmgr.ssh_validate import _report_real_path
 
-    assert _report_real_path("/tmp/x.conf line 3: Bad port", "/tmp/x.conf", Path("/home/me/.ssh/config")) == (
-        "/home/me/.ssh/config line 3: Bad port"
+    real = Path("/home/me/.ssh/config")  # str() uses backslashes on Windows
+    assert _report_real_path("/tmp/x.conf line 3: Bad port", "/tmp/x.conf", real) == (
+        f"{real} line 3: Bad port"
     )
