@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Save (`Ctrl+S` / Save button) opens a Save dialog.
+- "Validate config with SSH?" option in the Save and Unsaved Changes dialogs: runs `ssh -G` on the config as it would be written, then saves (showing "✔️ Validated"), or on failure offers "Show error" (view ssh's output and return to the editor) or "Continue anyway". The option starts checked when `ssh` is installed and is remembered for the session.
+
 ### Fixed
 - `Include` and other directives before the first `Host` block were deleted on save.
 - `Key=Value` / `Key = Value` lines were dropped, and `Host=name` headers were merged into the previous block.

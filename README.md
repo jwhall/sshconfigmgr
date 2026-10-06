@@ -9,11 +9,11 @@ A terminal UI for managing SSH client configuration files (`~/.ssh/config`).
 - Browse and edit all `Host` blocks in a config file from a single screen
 - Add, rename, and delete host entries
 - Add configuration fields with autocomplete — all `ssh_config(5)` keywords are available, filtered as you type; single-use keywords already present in the current host block are excluded
-- Validates data on save (e.g. Port range)
+- Validates data on save (e.g. Port range), and can optionally have OpenSSH check the whole config before it is written (see [Validating with ssh](#validating-with-ssh))
 - Lossless editing: comments, blank lines, indentation, `Key=Value` syntax, `Include`/`Match` blocks and line endings are preserved — only the lines you change are rewritten
 - Atomic saves that keep the file's permissions (new files are created `0600`), write through symlinks, and refuse to overwrite changes made by another program without confirmation
 - Open any SSH config file at launch or switch files at runtime
-- Prompts to save, discard, or cancel on quit when there are unsaved changes
+- Prompts to save, discard, or cancel on quit (or when opening another file) when there are unsaved changes
 
 ## Requirements
 
@@ -90,7 +90,7 @@ If the specified file does not exist you will be prompted to create it.
 |------------|-------------------------------------|
 | `n`        | New host entry                      |
 | `d`        | Delete current host entry           |
-| `Ctrl+S`   | Save                                |
+| `Ctrl+S`   | Save (opens the Save dialog)        |
 | `o`        | Open a different config file        |
 | `Esc`      | Return focus to the host list       |
 | `q`        | Quit (prompts if unsaved changes)   |
@@ -103,6 +103,18 @@ Click **+ Add Field** or press it from the keyboard to open the field picker. St
 Keywords that may only appear once per host block (the majority of `ssh_config(5)` directives) are removed from the list once they are already present in the current entry. Keywords that may repeat (`IdentityFile`, `LocalForward`, `RemoteForward`, `DynamicForward`, `CertificateFile`, `SendEnv`, `SetEnv`, `GlobalKnownHostsFile`) remain available.
 
 Custom or non-standard keywords can be typed freely and accepted without selecting from the list.
+
+### Validating with ssh
+
+The Save dialog (`Ctrl+S`) and the Unsaved Changes dialog (on quit or open) have a **Validate config with SSH?** checkbox. It starts checked when `ssh` is on your `PATH` (and is disabled otherwise), and remembers your choice for the rest of the session.
+
+When checked, the config as it would be written is copied to a temporary file and checked with `ssh -G -F <tempfile> sshconfigmgr-validate.invalid`, which parses the file and evaluates its `Host`/`Match` blocks without connecting. If ssh accepts it, the file is saved. If not, you can view ssh's error output (which returns you to the editor without saving) or continue and save anyway.
+
+Limitations of `ssh -G`:
+
+- Unknown keywords, missing arguments and invalid ports are reported anywhere in the file, but some values (e.g. yes/no options) are only checked in blocks that apply to the test host, typically `Host *`.
+- `Match exec` commands in your config are **executed** during validation, exactly as they would be when connecting.
+- Relative `Include` paths are resolved against `~/.ssh`, as for a user config, and a missing `Include` file is not an error.
 
 ## License
 

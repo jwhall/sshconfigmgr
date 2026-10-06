@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Awaitable, Callable
 
+import pytest
+
 from textual.pilot import Pilot
 from textual.widgets import Input
 
@@ -17,6 +19,14 @@ from sshconfigmgr.app import (
     UnsavedChangesScreen,
 )
 from sshconfigmgr.ssh_config import SSHConfig
+from sshconfigmgr import ssh_validate
+
+
+@pytest.fixture(autouse=True)
+def no_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests don't depend on whether ssh is installed; validation tests
+    opt in with the fake_validation fixture."""
+    monkeypatch.setattr(ssh_validate, "find_ssh", lambda: None)
 
 ORIGINAL = "Host a\n    Port 22\n"
 OTHER = "Host other\n    User o\n"
@@ -596,5 +606,299 @@ def test_picker_escape_cancels(tmp_config: Path) -> None:
         await pilot.pause()
         assert app._current_entry.params == []
         assert not app._modified
+
+    run(tmp_config, script)
+
+
+# ─── Save dialog and ssh validation ───────────────────────────────────────────
+
+from sshconfigmgr.app import (  # noqa: E402
+    SaveScreen,
+    ValidationErrorScreen,
+    ValidationFailedScreen,
+)
+from sshconfigmgr.ssh_validate import ValidationResult  # noqa: E402
+from textual.widgets import Button, Checkbox, Static  # noqa: E402
+
+
+class FakeValidation:
+    def __init__(self) -> None:
+        self.result = ValidationResult(True, "")
+        self.validated: list[str] = []
+
+    async def __call__(self, config: SSHConfig, **kwargs) -> ValidationResult:
+        self.validated.append(config.render())
+        return self.result
+
+
+@pytest.fixture
+def fake_validation(monkeypatch: pytest.MonkeyPatch) -> FakeValidation:
+    fake = FakeValidation()
+    monkeypatch.setattr(ssh_validate, "find_ssh", lambda: "/usr/bin/ssh")
+    monkeypatch.setattr(ssh_validate, "validate_with_ssh", fake)
+    return fake
+
+
+def notifications(app: SSHConfigApp) -> list[str]:
+    return [n.message for n in app._notifications]
+
+
+def checkbox(app: SSHConfigApp) -> Checkbox:
+    return app.screen.query_one("#validate-ssh", Checkbox)
+
+
+async def open_save(app: SSHConfigApp, pilot: Pilot) -> None:
+    await pilot.press("ctrl+s")
+    await pilot.pause()
+    assert isinstance(app.screen, SaveScreen)
+
+
+def test_ctrl_s_opens_save_dialog_and_cancel_does_not_write(tmp_config: Path) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        await open_save(app, pilot)
+        await choose(pilot, "cancel")
+        assert app._modified
+
+    run(tmp_config, script)
+    assert tmp_config.read_text() == ORIGINAL
+
+
+def test_save_dialog_enter_saves(tmp_config: Path) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        await open_save(app, pilot)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not app._modified
+
+    run(tmp_config, script)
+    assert tmp_config.read_text() == "Host a\n    Port 2222\n"
+
+
+def test_checkbox_disabled_without_ssh(tmp_config: Path) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await open_save(app, pilot)
+        box = checkbox(app)
+        assert box.disabled and not box.value
+        assert "ssh not found" in str(box.label)
+
+    run(tmp_config, script)
+
+
+def test_checkbox_defaults_on_and_is_remembered(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await open_save(app, pilot)
+        assert checkbox(app).value and not checkbox(app).disabled
+        await pilot.click("#validate-ssh")
+        await pilot.pause()
+        assert not checkbox(app).value
+        await choose(pilot, "cancel")
+        # Remembered in the next Save dialog ...
+        await open_save(app, pilot)
+        assert not checkbox(app).value
+        await pilot.click("#validate-ssh")
+        await choose(pilot, "cancel")
+        # ... and shared with the Quit dialog.
+        await set_port(app, pilot, "2222")
+        app.action_request_quit()
+        await pilot.pause()
+        assert isinstance(app.screen, UnsavedChangesScreen)
+        assert checkbox(app).value
+
+    run(tmp_config, script)
+
+
+def test_unchecked_save_skips_validation(tmp_config: Path, fake_validation: FakeValidation) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        await open_save(app, pilot)
+        await pilot.click("#validate-ssh")
+        await choose(pilot, "save")
+
+    run(tmp_config, script)
+    assert fake_validation.validated == []
+    assert tmp_config.read_text() == "Host a\n    Port 2222\n"
+
+
+def test_validation_success_shows_message_and_saves(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        await open_save(app, pilot)
+        await choose(pilot, "save")
+        await pilot.pause()
+        assert "✔️ Validated" in notifications(app)
+        assert not app._modified
+
+    run(tmp_config, script)
+    assert fake_validation.validated == ["Host a\n    Port 2222\n"]
+    assert tmp_config.read_text() == "Host a\n    Port 2222\n"
+
+
+def test_validation_failure_continue_anyway_saves(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+    fake_validation.result = ValidationResult(False, "config: line 2: Bad configuration option: prot")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        await open_save(app, pilot)
+        await choose(pilot, "save")
+        await pilot.pause()
+        assert isinstance(app.screen, ValidationFailedScreen)
+        await choose(pilot, "continue")
+        assert not app._modified
+
+    run(tmp_config, script)
+    assert tmp_config.read_text() == "Host a\n    Port 2222\n"
+
+
+def test_validation_failure_show_error_then_close_returns_to_editor(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+    error = "config: line 2: Bad configuration option: [prot]"
+    fake_validation.result = ValidationResult(False, error)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        await open_save(app, pilot)
+        await choose(pilot, "save")
+        await pilot.pause()
+        await choose(pilot, "show")
+        assert isinstance(app.screen, ValidationErrorScreen)
+        shown = str(app.screen.query_one("#validation-output Static", Static).render())
+        assert shown == error  # brackets shown literally, not parsed as markup
+        assert [b.id for b in app.screen.query(Button)] == ["close"]
+        await choose(pilot, "close")
+        assert app.screen is app.screen_stack[0]  # back to the editor
+        assert app._modified
+
+    run(tmp_config, script)
+    assert tmp_config.read_text() == ORIGINAL
+
+
+def test_validation_failure_escape_returns_to_editor(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+    fake_validation.result = ValidationResult(False, "bad")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        await open_save(app, pilot)
+        await choose(pilot, "save")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]
+
+    run(tmp_config, script)
+    assert tmp_config.read_text() == ORIGINAL
+
+
+def test_quit_validation_success_saves_and_quits(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        app.action_request_quit()
+        await pilot.pause()
+        await choose(pilot, "save")
+        await pilot.pause()
+        assert not app.is_running
+
+    run(tmp_config, script)
+    assert len(fake_validation.validated) == 1
+    assert tmp_config.read_text() == "Host a\n    Port 2222\n"
+
+
+def test_quit_validation_failure_show_error_stays_open(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+    fake_validation.result = ValidationResult(False, "bad")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        app.action_request_quit()
+        await pilot.pause()
+        await choose(pilot, "save")
+        await pilot.pause()
+        await choose(pilot, "show")
+        await choose(pilot, "close")
+        assert app.is_running
+        assert app._modified
+
+    run(tmp_config, script)
+    assert tmp_config.read_text() == ORIGINAL
+
+
+def test_quit_validation_failure_continue_anyway_saves_and_quits(
+    tmp_config: Path, fake_validation: FakeValidation
+) -> None:
+    tmp_config.write_text(ORIGINAL)
+    fake_validation.result = ValidationResult(False, "bad")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        app.action_request_quit()
+        await pilot.pause()
+        await choose(pilot, "save")
+        await pilot.pause()
+        await choose(pilot, "continue")
+        assert not app.is_running
+
+    run(tmp_config, script)
+    assert tmp_config.read_text() == "Host a\n    Port 2222\n"
+
+
+def test_quit_unchecked_does_not_validate(tmp_config: Path, fake_validation: FakeValidation) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        app.action_request_quit()
+        await pilot.pause()
+        await pilot.click("#validate-ssh")
+        await choose(pilot, "save")
+        assert not app.is_running
+
+    run(tmp_config, script)
+    assert fake_validation.validated == []
+
+
+def test_picker_highlights_do_not_reach_host_selection(tmp_config: Path) -> None:
+    """OptionHighlighted from the picker bubbles to the app; only the host
+    list's highlights may select hosts."""
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        selected: list[int] = []
+        original = app._select
+        app._select = lambda index: (selected.append(index), original(index))[1]
+        await open_picker(app, pilot)
+        await pilot.press(*"Pro", "down", "down", "up")
+        await pilot.pause()
+        assert selected == []
 
     run(tmp_config, script)

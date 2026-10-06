@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from rich.text import Text
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -13,6 +14,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import (
     Button,
+    Checkbox,
     Footer,
     Header,
     Input,
@@ -22,6 +24,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
+from sshconfigmgr import ssh_validate
 from sshconfigmgr.ssh_config import ConfigChangedError, HostEntry, SSHConfig
 
 # ─── Styles ───────────────────────────────────────────────────────────────────
@@ -235,7 +238,8 @@ Input:focus {
 
 /* ── Modal dialogs ── */
 
-ConfirmScreen, InputScreen, UnsavedChangesScreen {
+ConfirmScreen, InputScreen, UnsavedChangesScreen, SaveScreen,
+ValidationFailedScreen, ValidationErrorScreen {
     align: center middle;
 }
 
@@ -256,6 +260,8 @@ ConfirmScreen, InputScreen, UnsavedChangesScreen {
 .dialog-msg {
     color: #a0a0a0;
     margin-bottom: 0;
+    /* Full width so long messages (e.g. file paths) wrap instead of clipping. */
+    width: 100%;
 }
 
 .dialog-buttons {
@@ -276,6 +282,34 @@ ConfirmScreen, InputScreen, UnsavedChangesScreen {
 .dialog-buttons Button.-primary {
     border: tall #2a5070;
     color: #6a9fb5;
+}
+
+.dialog-wide {
+    width: 90%;
+    max-width: 110;
+}
+
+#validation-output {
+    height: auto;
+    max-height: 15;
+    background: #181818;
+    border: tall #2e2e2e;
+    padding: 0 1;
+}
+
+#validation-output Static {
+    color: #c8c8c8;
+}
+
+#validate-ssh {
+    margin-top: 1;
+    background: transparent;
+    border: none;
+    color: #a0a0a0;
+}
+
+#validate-ssh:focus {
+    color: #d4d4d4;
 }
 
 .dialog-buttons Button.-error {
@@ -351,29 +385,86 @@ class InputScreen(ModalScreen[Optional[str]]):
             self.dismiss(None)
 
 
+VALIDATE_LABEL = "Validate config with SSH?"
+
+
+def validate_checkbox(value: bool, available: bool) -> Checkbox:
+    """The "Validate config with SSH?" option shown in Save and Quit dialogs."""
+    if available:
+        return Checkbox(VALIDATE_LABEL, value, id="validate-ssh")
+    return Checkbox(f"{VALIDATE_LABEL} (ssh not found)", False, id="validate-ssh", disabled=True)
+
+
+class SaveScreen(ModalScreen[bool]):
+    """Confirm saving, with the option to validate with ssh first.
+
+    Dismisses with True (save) or False (cancel); the checkbox state is
+    available afterwards as ``validate``.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss(False)", show=False),
+    ]
+
+    def __init__(self, path: Path, validate: bool, ssh_available: bool) -> None:
+        super().__init__()
+        self._path = path
+        self.validate = validate
+        self.ssh_available = ssh_available
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label("Save Changes", classes="dialog-title")
+            yield Label(f"Write changes to {self._path}?", classes="dialog-msg")
+            yield validate_checkbox(self.validate, self.ssh_available)
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#save", Button).focus()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        self.validate = event.value
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "save")
+
+
 class UnsavedChangesScreen(ModalScreen[Optional[str]]):
     """Three-way dialog: Save / Discard / Cancel before leaving unsaved changes.
 
     *action* names what happens afterwards (e.g. "Quit", "Open").
-    Dismisses with: "save", "discard", or None (cancel).
+    Dismisses with: "save", "discard", or None (cancel); the checkbox state
+    is available afterwards as ``validate``.
     """
 
     BINDINGS = [
         Binding("escape", "dismiss(None)", show=False),
     ]
 
-    def __init__(self, action: str) -> None:
+    def __init__(self, action: str, validate: bool = False, ssh_available: bool = False) -> None:
         super().__init__()
         self._action = action
+        self.validate = validate
+        self.ssh_available = ssh_available
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Label("Unsaved Changes", classes="dialog-title")
             yield Label("You have unsaved changes. What would you like to do?", classes="dialog-msg")
+            yield validate_checkbox(self.validate, self.ssh_available)
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button(f"Discard & {self._action}", id="discard", variant="error")
                 yield Button(f"Save & {self._action}", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        # Keep Cancel as the default so a reflexive Enter loses nothing.
+        self.query_one("#cancel", Button).focus()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        self.validate = event.value
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
@@ -383,6 +474,59 @@ class UnsavedChangesScreen(ModalScreen[Optional[str]]):
             self.dismiss("discard")
         else:
             self.dismiss(None)
+
+
+class ValidationFailedScreen(ModalScreen[Optional[str]]):
+    """ssh rejected the config.  Dismisses with "show", "continue", or None
+    (Escape: back to the editor without saving)."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label("❌ Validation failed", classes="dialog-title")
+            yield Label(
+                "ssh reported errors in the configuration. Nothing has been written yet.",
+                classes="dialog-msg",
+            )
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Show error", id="show", variant="primary")
+                yield Button("Continue anyway", id="continue", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#show", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
+
+
+class ValidationErrorScreen(ModalScreen[None]):
+    """Shows the output of the ssh validation run."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", show=False),
+    ]
+
+    def __init__(self, output: str) -> None:
+        super().__init__()
+        self._output = output
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog dialog-wide"):
+            yield Label("SSH Validation Error", classes="dialog-title")
+            with VerticalScroll(id="validation-output"):
+                # Text, not str: ssh output must not be parsed as markup.
+                yield Static(Text(self._output))
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Close", id="close", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#close", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
 
 
 # ─── SSH keyword data ──────────────────────────────────────────────────────────
@@ -755,6 +899,8 @@ class SSHConfigApp(App[None]):
         self._config = SSHConfig(path=config_path)
         self._current_entry: Optional[HostEntry] = None
         self._modified = False
+        # "Validate config with SSH?" choice; None until first set this session.
+        self._validate_with_ssh: Optional[bool] = None
         # Rows of the entry being edited, in order.  Tracked explicitly rather
         # than queried from the DOM, where removed rows linger until pruned.
         self._rows: list[ParamRow] = []
@@ -894,7 +1040,10 @@ class SSHConfigApp(App[None]):
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
-    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+    # Only the host list: highlights in other OptionLists (e.g. the keyword
+    # picker's suggestions) bubble up to the app too.
+    @on(OptionList.OptionHighlighted, "#host-list")
+    def host_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         # Read the list's current state rather than the event's index: the
         # list may have been rebuilt since this message was posted.
         idx = self.query_one("#host-list", HostList).highlighted
@@ -999,13 +1148,41 @@ class SSHConfigApp(App[None]):
             on_result,
         )
 
+    # ── Saving ───────────────────────────────────────────────────────────────
+
+    def _ssh_validate_option(self) -> tuple[bool, bool]:
+        """(initial checkbox value, ssh available) for Save/Quit dialogs.
+
+        The checkbox starts checked when ssh is installed, then remembers the
+        last choice for the rest of the session.
+        """
+        available = ssh_validate.find_ssh() is not None
+        if not available:
+            return False, False
+        return (True if self._validate_with_ssh is None else self._validate_with_ssh), True
+
+    def _remember_ssh_validate(self, screen: SaveScreen | UnsavedChangesScreen) -> None:
+        if screen.ssh_available:
+            self._validate_with_ssh = screen.validate
+
     def action_save(self) -> None:
-        self._save()
+        validate, available = self._ssh_validate_option()
+        screen = SaveScreen(self._config_path, validate, available)
 
-    def _save(self, on_success: Optional[Callable[[], None]] = None) -> None:
-        """Validate and write the config; call *on_success* only if it was written.
+        def on_result(save: bool) -> None:
+            self._remember_ssh_validate(screen)
+            if save:
+                self._save(validate=screen.validate)
 
-        Validation errors, write errors and declining to overwrite an external
+        self.push_screen(screen, on_result)
+
+    def _save(
+        self, on_success: Optional[Callable[[], None]] = None, validate: bool = False
+    ) -> None:
+        """Check and write the config; call *on_success* only if it was written.
+
+        Built-in validation errors, a failed ssh validation (unless the user
+        continues anyway), write errors and declining to overwrite an external
         change all leave *on_success* uncalled.
         """
         self._sync_params_to_entry()
@@ -1013,7 +1190,26 @@ class SSHConfigApp(App[None]):
         if errors:
             self.notify("\n".join(errors), title="Validation error", severity="error", timeout=6)
             return
-        self._write_config(on_success=on_success)
+        if validate:
+            self._ssh_validate_then_write(on_success)
+        else:
+            self._write_config(on_success=on_success)
+
+    @work(exclusive=True, group="ssh-validate")
+    async def _ssh_validate_then_write(self, on_success: Optional[Callable[[], None]]) -> None:
+        result = await ssh_validate.validate_with_ssh(self._config)
+        if result.ok:
+            self.notify("✔️ Validated", timeout=2)
+            self._write_config(on_success=on_success)
+            return
+
+        def on_choice(choice: Optional[str]) -> None:
+            if choice == "continue":
+                self._write_config(on_success=on_success)
+            elif choice == "show":
+                self.push_screen(ValidationErrorScreen(result.output))
+
+        self.push_screen(ValidationFailedScreen(), on_choice)
 
     def _write_config(
         self, force: bool = False, on_success: Optional[Callable[[], None]] = None
@@ -1049,13 +1245,17 @@ class SSHConfigApp(App[None]):
             proceed()
             return
 
+        validate, available = self._ssh_validate_option()
+        screen = UnsavedChangesScreen(action, validate, available)
+
         def on_result(choice: Optional[str]) -> None:
+            self._remember_ssh_validate(screen)
             if choice == "save":
-                self._save(on_success=proceed)
+                self._save(on_success=proceed, validate=screen.validate)
             elif choice == "discard":
                 proceed()
 
-        self.push_screen(UnsavedChangesScreen(action), on_result)
+        self.push_screen(screen, on_result)
 
     def action_open_file(self) -> None:
         def on_path(path_str: Optional[str]) -> None:
