@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -238,7 +238,7 @@ Input:focus {
 
 /* ── Modal dialogs ── */
 
-ConfirmScreen, InputScreen {
+ConfirmScreen, InputScreen, UnsavedChangesScreen {
     align: center middle;
 }
 
@@ -354,9 +354,10 @@ class InputScreen(ModalScreen[Optional[str]]):
             self.dismiss(None)
 
 
-class QuitConfirmScreen(ModalScreen[Optional[str]]):
-    """Three-way dialog: Save / Discard / Cancel when quitting with unsaved changes.
+class UnsavedChangesScreen(ModalScreen[Optional[str]]):
+    """Three-way dialog: Save / Discard / Cancel before leaving unsaved changes.
 
+    *action* names what happens afterwards (e.g. "Quit", "Open").
     Dismisses with: "save", "discard", or None (cancel).
     """
 
@@ -364,14 +365,18 @@ class QuitConfirmScreen(ModalScreen[Optional[str]]):
         Binding("escape", "dismiss(None)", show=False),
     ]
 
+    def __init__(self, action: str) -> None:
+        super().__init__()
+        self._action = action
+
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Label("Unsaved Changes", classes="dialog-title")
             yield Label("You have unsaved changes. What would you like to do?", classes="dialog-msg")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
-                yield Button("Discard", id="discard", variant="error")
-                yield Button("Save & Quit", id="save", variant="primary")
+                yield Button(f"Discard & {self._action}", id="discard", variant="error")
+                yield Button(f"Save & {self._action}", id="save", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
@@ -941,20 +946,30 @@ class SSHConfigApp(App[None]):
         )
 
     def action_save(self) -> None:
+        self._save()
+
+    def _save(self, on_success: Optional[Callable[[], None]] = None) -> None:
+        """Validate and write the config; call *on_success* only if it was written.
+
+        Validation errors, write errors and declining to overwrite an external
+        change all leave *on_success* uncalled.
+        """
         self._sync_params_to_entry()
         errors = self._validate()
         if errors:
             self.notify("\n".join(errors), title="Validation error", severity="error", timeout=6)
             return
-        self._write_config()
+        self._write_config(on_success=on_success)
 
-    def _write_config(self, force: bool = False) -> None:
+    def _write_config(
+        self, force: bool = False, on_success: Optional[Callable[[], None]] = None
+    ) -> None:
         try:
             self._config.save(force=force)
         except ConfigChangedError:
             def on_result(confirmed: bool) -> None:
                 if confirmed:
-                    self._write_config(force=True)
+                    self._write_config(force=True, on_success=on_success)
 
             self.push_screen(
                 ConfirmScreen(
@@ -971,23 +986,44 @@ class SSHConfigApp(App[None]):
         self._modified = False
         self._update_title()
         self.notify("Saved.", title="sshconfigmgr", timeout=2)
+        if on_success is not None:
+            on_success()
+
+    def _confirm_leave(self, action: str, proceed: Callable[[], None]) -> None:
+        """Run *proceed* now if there are no unsaved changes, otherwise only
+        after the user chooses to save (successfully) or discard them."""
+        if not self._modified:
+            proceed()
+            return
+
+        def on_result(choice: Optional[str]) -> None:
+            if choice == "save":
+                self._save(on_success=proceed)
+            elif choice == "discard":
+                proceed()
+
+        self.push_screen(UnsavedChangesScreen(action), on_result)
 
     def action_open_file(self) -> None:
         def on_path(path_str: Optional[str]) -> None:
             if not path_str:
                 return
             path = Path(path_str).expanduser().resolve()
+
+            def load() -> None:
+                self._confirm_leave("Open", lambda: self._load_config(path))
+
             if not path.exists():
                 def on_create(confirmed: bool) -> None:
                     if confirmed:
-                        self._load_config(path)
+                        load()
 
                 self.push_screen(
                     ConfirmScreen(f"File not found. Create {path}?", "Open File"),
                     on_create,
                 )
             else:
-                self._load_config(path)
+                load()
 
         self.push_screen(
             InputScreen("File path", "Open SSH Config", str(self._config_path)),
@@ -995,18 +1031,7 @@ class SSHConfigApp(App[None]):
         )
 
     def action_request_quit(self) -> None:
-        if not self._modified:
-            self.exit()
-            return
-
-        def on_result(choice: Optional[str]) -> None:
-            if choice == "save":
-                self.action_save()
-                self.exit()
-            elif choice == "discard":
-                self.exit()
-
-        self.push_screen(QuitConfirmScreen(), on_result)
+        self._confirm_leave("Quit", self.exit)
 
     def _do_add_field(self) -> None:
         if self._current_entry is None:

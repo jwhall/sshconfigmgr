@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file. This projec
 - Comments inside a block moved to the next block; a trailing comment at end of file was dropped.
 - Blank lines accumulated by one per save.
 - Non-UTF-8 bytes were replaced with U+FFFD on save.
+- "Save & Quit" quit (discarding edits) when the save failed validation, failed to write, or an overwrite was declined; it now only quits after a successful save.
+- Opening another file (`o`) discarded unsaved changes without asking; it now offers Save / Discard / Cancel first.
 
 ### Changed
 - The parser is now lossless: an unmodified config saves byte-for-byte identical, and edits re-render only the changed lines using the block's existing indentation and separator style.
