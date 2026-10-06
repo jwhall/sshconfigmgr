@@ -243,3 +243,82 @@ def test_open_new_file_with_changes_prompts_after_create(tmp_config: Path, tmp_p
         assert app._config_path == missing.resolve()
 
     run(tmp_config, script)
+
+
+# ─── Unsaved flag ─────────────────────────────────────────────────────────────
+
+MULTI = "Host a\n    User x\n    Port 22\n\nHost b\n    User y\n\nHost c\n    User z\n    Port 2\n"
+
+
+def test_startup_and_navigation_do_not_set_modified(tmp_config: Path) -> None:
+    tmp_config.write_text(MULTI)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await pilot.pause()
+        assert not app._modified
+        for key in "jjkjj":
+            await pilot.press(key)
+            await pilot.pause()
+            assert not app._modified, f"modified after pressing {key}"
+        assert "(unsaved)" not in app.sub_title
+
+    run(tmp_config, script)
+
+
+def test_edit_then_revert_clears_modified(tmp_config: Path) -> None:
+    tmp_config.write_text(ORIGINAL)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await set_port(app, pilot, "2222")
+        assert "(unsaved)" in app.sub_title
+        await set_port_unchecked(app, pilot, "22")
+        assert not app._modified
+        assert "(unsaved)" not in app.sub_title
+
+    run(tmp_config, script)
+
+
+async def set_port_unchecked(app: SSHConfigApp, pilot: Pilot, value: str) -> None:
+    app.query(ParamRow).first().query_one(".param-val", Input).value = value
+    await pilot.pause()
+
+
+def test_deleting_a_field_sets_modified_and_updates_model(tmp_config: Path) -> None:
+    tmp_config.write_text(MULTI)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        row = app.query(ParamRow).last()
+        row.post_message(ParamRow.DeleteRequested(row))
+        await pilot.pause()
+        assert app._modified
+        assert app._config.entries[0].params == [("User", "x")]
+
+    run(tmp_config, script)
+
+
+def test_adding_a_field_sets_modified(tmp_config: Path) -> None:
+    tmp_config.write_text(MULTI)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        app._do_add_field()
+        await pilot.pause()
+        await pilot.press(*"ForwardAgent", "enter")
+        await pilot.pause()
+        assert app._modified
+        await pilot.press(*"yes")
+        await pilot.pause()
+        assert app._config.entries[0].get("ForwardAgent") == "yes"
+
+    run(tmp_config, script)
+
+
+def test_host_level_edits_set_modified(tmp_config: Path) -> None:
+    tmp_config.write_text(MULTI)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        app.action_delete_host()
+        await pilot.pause()
+        await choose(pilot, "ok")
+        assert app._modified
+
+    run(tmp_config, script)

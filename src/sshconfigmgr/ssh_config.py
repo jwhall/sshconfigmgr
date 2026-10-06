@@ -281,6 +281,8 @@ class SSHConfig:
         self.newline = "\n"
         # Disk state at load time; None means the file did not exist.
         self._stamp: Optional[tuple[int, int]] = None
+        # Rendered text as last loaded or saved, for is_modified().
+        self._clean_text = ""
 
     @property
     def preamble(self) -> list[str]:
@@ -319,6 +321,12 @@ class SSHConfig:
             entry = HostEntry._from_lines(line, leading)
             self.entries.append(entry)
             target = entry.body
+        self._clean_text = self.render()
+
+    def is_modified(self) -> bool:
+        """True if saving would write something other than what was last
+        loaded or saved.  Edits that are later undone don't count."""
+        return self.render() != self._clean_text
 
     def lines(self) -> list[Line]:
         out = list(self.preamble_lines)
@@ -377,7 +385,8 @@ class SSHConfig:
         if not force and _disk_stamp(target) != self._stamp:
             raise ConfigChangedError(f"{target} changed on disk since it was loaded")
 
-        data = self.render().encode("utf-8", errors="surrogateescape")
+        text = self.render()
+        data = text.encode("utf-8", errors="surrogateescape")
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             st: Optional[os.stat_result] = target.stat()
@@ -409,3 +418,4 @@ class SSHConfig:
             if line.dirty:
                 line.raw, line.dirty = line.text, False
         self._stamp = _disk_stamp(target)
+        self._clean_text = text

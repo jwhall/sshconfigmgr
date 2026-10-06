@@ -192,3 +192,41 @@ def test_repeated_saves_do_not_accumulate_blank_lines(tmp_config: Path) -> None:
     text = tmp_config.read_text()
     assert "\n\n\n\n" not in text
     assert text.count("User u") == 1
+
+
+# ─── is_modified ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("name", sorted(CORPUS))
+def test_freshly_loaded_config_is_not_modified(tmp_config: Path, name: str) -> None:
+    tmp_config.write_bytes(CORPUS[name])
+    assert not SSHConfig.from_path(tmp_config).is_modified()
+
+
+def test_new_empty_config_is_not_modified(tmp_config: Path) -> None:
+    assert not SSHConfig.from_path(tmp_config).is_modified()
+
+
+def test_edit_then_revert_is_not_modified() -> None:
+    config = kitchen_sink()
+    config.entries[0].set("Port", "2200")
+    assert config.is_modified()
+    config.entries[0].set("Port", "2222")
+    assert not config.is_modified()
+
+
+def test_structural_changes_are_modified() -> None:
+    config = kitchen_sink()
+    config.remove_entry(config.entries[1])
+    assert config.is_modified()
+    config = kitchen_sink()
+    config.add_entry("new")
+    assert config.is_modified()
+
+
+def test_save_clears_modified(tmp_config: Path) -> None:
+    tmp_config.write_bytes(CORPUS["simple"])
+    config = SSHConfig.from_path(tmp_config)
+    config.entries[0].set("User", "y")
+    config.save()
+    assert not config.is_modified()

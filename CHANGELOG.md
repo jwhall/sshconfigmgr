@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file. This projec
 - Non-UTF-8 bytes were replaced with U+FFFD on save.
 - "Save & Quit" quit (discarding edits) when the save failed validation, failed to write, or an overwrite was declined; it now only quits after a successful save.
 - Opening another file (`o`) discarded unsaved changes without asking; it now offers Save / Discard / Cancel first.
+- Moving through the host list (and sometimes just launching) marked the file as unsaved. The unsaved flag is now derived from content — it is set only when the file as it would be written differs from what was last loaded or saved, so undoing an edit by hand also clears it.
 
 ### Changed
 - The parser is now lossless: an unmodified config saves byte-for-byte identical, and edits re-render only the changed lines using the block's existing indentation and separator style.

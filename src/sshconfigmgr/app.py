@@ -652,14 +652,18 @@ class ParamRow(Widget):
 
     @property
     def key(self) -> str:
-        return self.query_one(".param-key", Input).value
+        return self._key
 
     @property
     def value(self) -> str:
-        return self.query_one(".param-val", Input).value
+        return self._val
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
+        if event.input.has_class("param-key"):
+            self._key = event.value
+        else:
+            self._val = event.value
         self.post_message(self.Changed())
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -703,7 +707,9 @@ class SSHConfigApp(App[None]):
         self._current_entry: Optional[HostEntry] = None
         self._modified = False
         self._loading = False        # guard against spurious Highlighted events
-        self._loading_entry = False  # guard against Input.Changed fired on mount
+        # Rows of the entry being edited, in order.  Tracked explicitly rather
+        # than queried from the DOM, where removed rows linger until pruned.
+        self._rows: list[ParamRow] = []
 
     # ── Composition ──────────────────────────────────────────────────────────
 
@@ -769,9 +775,12 @@ class SSHConfigApp(App[None]):
         mod = " (unsaved)" if self._modified else ""
         self.sub_title = f"{self._config_path}{mod}"
 
-    def _mark_modified(self) -> None:
-        if not self._modified:
-            self._modified = True
+    def _refresh_modified(self) -> None:
+        """Derive the unsaved flag from content: modified means the file as it
+        would be written differs from what was last loaded or saved."""
+        modified = self._config.is_modified()
+        if modified != self._modified:
+            self._modified = modified
             self._update_title()
 
     # ── Editor ───────────────────────────────────────────────────────────────
@@ -780,32 +789,30 @@ class SSHConfigApp(App[None]):
         self.query_one("#empty-msg").display = True
         self.query_one("#add-field").display = False
         self.query_one("#editor-header", Static).update("")
-        for row in self.query(ParamRow):
+        self._clear_rows()
+
+    def _clear_rows(self) -> None:
+        for row in self._rows:
             row.remove()
+        self._rows = []
 
     def _load_entry(self, entry: HostEntry) -> None:
-        self._loading_entry = True
         self._current_entry = entry
         self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
-        for row in self.query(ParamRow):
-            row.remove()
+        self._clear_rows()
         self.query_one("#empty-msg").display = False
         self.query_one("#add-field").display = True
         add_btn = self.query_one("#add-field")
-        for key, value in entry.params:
-            add_btn.parent.mount(ParamRow(key, value), before=add_btn)
-        self.call_after_refresh(
-            lambda: self.call_after_refresh(
-                lambda: setattr(self, "_loading_entry", False)
-            )
-        )
+        self._rows = [ParamRow(key, value) for key, value in entry.params]
+        for row in self._rows:
+            add_btn.parent.mount(row, before=add_btn)
 
     def _sync_params_to_entry(self) -> None:
         if self._current_entry is None:
             return
         params = [
             (row.key.strip(), row.value.strip())
-            for row in self.query(ParamRow)
+            for row in self._rows
             if row.key.strip()
         ]
         self._current_entry.params = params
@@ -840,13 +847,14 @@ class SSHConfigApp(App[None]):
 
     def on_param_row_changed(self, event: ParamRow.Changed) -> None:
         self._sync_params_to_entry()
-        if not self._loading_entry:
-            self._mark_modified()
+        self._refresh_modified()
 
     def on_param_row_delete_requested(self, event: ParamRow.DeleteRequested) -> None:
+        if event.row in self._rows:
+            self._rows.remove(event.row)
         event.row.remove()
         self._sync_params_to_entry()
-        self._mark_modified()
+        self._refresh_modified()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
@@ -880,7 +888,7 @@ class SSHConfigApp(App[None]):
             self._load_entry(entry)
             lv = self.query_one("#host-list", HostListView)
             lv.index = len(self._config.entries) - 1
-            self._mark_modified()
+            self._refresh_modified()
 
         self.push_screen(
             InputScreen("Host pattern (e.g. myserver, bastion, *.corp)", "New Host Entry"),
@@ -905,7 +913,7 @@ class SSHConfigApp(App[None]):
             self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
             if current_idx is not None:
                 lv.index = current_idx
-            self._mark_modified()
+            self._refresh_modified()
 
         self.push_screen(
             InputScreen(
@@ -932,7 +940,7 @@ class SSHConfigApp(App[None]):
             self._loading = True
             self._rebuild_list()
             self._loading = False
-            self._mark_modified()
+            self._refresh_modified()
             if self._config.entries:
                 lv = self.query_one("#host-list", HostListView)
                 lv.index = 0
@@ -983,8 +991,7 @@ class SSHConfigApp(App[None]):
         except OSError as exc:
             self.notify(str(exc), title="Save failed", severity="error")
             return
-        self._modified = False
-        self._update_title()
+        self._refresh_modified()
         self.notify("Saved.", title="sshconfigmgr", timeout=2)
         if on_success is not None:
             on_success()
@@ -1036,15 +1043,17 @@ class SSHConfigApp(App[None]):
     def _do_add_field(self) -> None:
         if self._current_entry is None:
             return
-        existing_keys = [row.key for row in self.query(ParamRow)]
+        existing_keys = [row.key for row in self._rows]
 
         def on_keyword(keyword: Optional[str]) -> None:
             if not keyword:
                 return
             add_btn = self.query_one("#add-field")
             row = ParamRow(keyword, "")
+            self._rows.append(row)
             add_btn.parent.mount(row, before=add_btn)
             self.call_after_refresh(lambda: row.query_one(".param-val", Input).focus())
-            self._mark_modified()
+            self._sync_params_to_entry()
+            self._refresh_modified()
 
         self.push_screen(AddFieldScreen(existing_keys), on_keyword)
