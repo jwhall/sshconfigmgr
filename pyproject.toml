@@ -8,7 +8,8 @@ version = "0.3.0"
 description = "TUI for managing SSH client configurations"
 requires-python = ">=3.11"
 dependencies = [
-    "textual>=0.70.0",
+    # 2.0.0 and 2.0.1 have an OptionList bug where added options are not shown.
+    "textual>=0.70.0,!=2.0.0,!=2.0.1",
 ]
 
 [project.urls]

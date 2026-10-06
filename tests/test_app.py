@@ -16,6 +16,7 @@ from sshconfigmgr.app import (
     SSHConfigApp,
     UnsavedChangesScreen,
 )
+from sshconfigmgr.ssh_config import SSHConfig
 
 ORIGINAL = "Host a\n    Port 22\n"
 OTHER = "Host other\n    User o\n"
@@ -320,5 +321,178 @@ def test_host_level_edits_set_modified(tmp_config: Path) -> None:
         await pilot.pause()
         await choose(pilot, "ok")
         assert app._modified
+
+    run(tmp_config, script)
+
+
+# ─── Host list and editor ─────────────────────────────────────────────────────
+
+# Hosts with different numbers of params, so the editor has to grow and
+# shrink its rows while navigating.
+VARIED = (
+    "Host zero\n"
+    "\nHost three\n    User u3\n    Port 3\n    ForwardAgent yes\n"
+    "\nHost one\n    User u1\n"
+    "\nHost five\n" + "".join(f"    SetEnv K{i}=v{i}\n" for i in range(5))
+    + "\nHost two\n    User u2\n    Port 2\n"
+)
+
+
+def shown_params(app: SSHConfigApp) -> list[tuple[str, str]]:
+    """What the editor actually displays, read from the Input widgets."""
+    shown = []
+    for row in app.query(ParamRow):
+        key, val = row.query(Input)
+        shown.append((key.value, val.value))
+    return shown
+
+
+def host_list_labels(app: SSHConfigApp) -> list[str]:
+    from sshconfigmgr.app import HostList
+
+    host_list = app.query_one(HostList)
+    return [str(host_list.get_option_at_index(i).prompt) for i in range(host_list.option_count)]
+
+
+def test_editor_shows_each_entry_while_navigating(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        for expected in (1, 2, 3, 4, 3, 2, 1, 0):
+            key = "j" if expected > app._config.entries.index(app._current_entry) else "k"
+            await pilot.press(key)
+            await pilot.pause()
+            entry = app._config.entries[expected]
+            assert app._current_entry is entry
+            assert shown_params(app) == entry.params, entry.pattern
+
+    run(tmp_config, script)
+
+
+def test_editor_consistent_after_key_burst(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await pilot.press(*"jjjjkjjkkj")  # no pause between keys
+        await pilot.pause()
+        entry = app._config.entries[3]
+        assert app._current_entry is entry
+        assert shown_params(app) == entry.params
+        assert not app._modified
+
+    run(tmp_config, script)
+
+
+def test_edit_after_navigation_goes_to_the_right_entry(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        for _ in range(3):  # zero -> three -> one -> five (rows reused)
+            await pilot.press("j")
+            await pilot.pause()
+        app.query(ParamRow).first().query(Input).last().value = "changed"
+        await pilot.pause()
+        five, others = app._config.entries[3], app._config.entries[:3]
+        assert five.get("SetEnv") == "changed"
+        original = SSHConfig.from_path(tmp_config).entries[:3]
+        assert [e.params for e in others] == [e.params for e in original]
+
+    run(tmp_config, script)
+
+
+def test_match_labels_are_not_parsed_as_markup(tmp_config: Path) -> None:
+    tmp_config.write_text('Host a\n\nMatch exec "[ -f /tmp/[bold]x ]"\n    User m\n')
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        assert host_list_labels(app) == ["a", 'Match exec "[ -f /tmp/[bold]x ]"']
+
+    run(tmp_config, script)
+
+
+def test_rename_updates_list_label(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await pilot.press("j")
+        await pilot.pause()
+        app.action_edit_host()
+        await pilot.pause()
+        app.screen.query_one("#dialog-input", Input).value = "three tres"
+        await choose(pilot, "ok")
+        assert host_list_labels(app)[1] == "three tres"
+        assert app._current_entry is app._config.entries[1]
+
+    run(tmp_config, script)
+
+
+def test_delete_selects_the_next_host(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await pilot.press("j", "j")
+        await pilot.pause()
+        app.action_delete_host()
+        await pilot.pause()
+        await choose(pilot, "ok")
+        assert host_list_labels(app) == ["zero", "three", "five", "two"]
+        assert app._current_entry.pattern == "five"
+        assert shown_params(app) == app._current_entry.params
+
+    run(tmp_config, script)
+
+
+def test_delete_last_host_selects_new_last(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await pilot.press("end")
+        await pilot.pause()
+        app.action_delete_host()
+        await pilot.pause()
+        await choose(pilot, "ok")
+        assert app._current_entry.pattern == "five"
+
+    run(tmp_config, script)
+
+
+def test_new_host_is_selected(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        app.action_new_host()
+        await pilot.pause()
+        app.screen.query_one("#dialog-input", Input).value = "fresh"
+        await choose(pilot, "ok")
+        assert host_list_labels(app)[-1] == "fresh"
+        assert app._current_entry.pattern == "fresh"
+        assert shown_params(app) == []
+
+    run(tmp_config, script)
+
+
+def test_open_shows_first_entry_of_new_file(tmp_config: Path, tmp_path: Path) -> None:
+    tmp_config.write_text(VARIED)
+    other = tmp_path / "other"
+    other.write_text("Host o1\n    User x\n\nHost o2\n")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await open_path(app, pilot, other)
+        assert host_list_labels(app) == ["o1", "o2"]
+        assert app._current_entry.pattern == "o1"
+        assert shown_params(app) == [("User", "x")]
+
+    run(tmp_config, script)
+
+
+def test_cursor_stops_at_list_ends(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await pilot.press("k")
+        await pilot.pause()
+        assert app._current_entry.pattern == "zero"
+        await pilot.press("end", "j", "down")
+        await pilot.pause()
+        assert app._current_entry.pattern == "two"
 
     run(tmp_config, script)

@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file. This projec
 - The parser is now lossless: an unmodified config saves byte-for-byte identical, and edits re-render only the changed lines using the block's existing indentation and separator style.
 - Saves are atomic (temp file, fsync, rename), preserve the existing file mode and ownership, create new files as `0600`, and write through symlinks.
 - Saving now detects if the file changed on disk since it was opened and asks before overwriting.
+- The host list is now an `OptionList`, which draws rows as lines instead of one widget per host: startup with 1,000 hosts drops from ~4.4 s to ~0.25 s, and moving between hosts no longer slows down as the list grows.
+- Switching hosts reuses the editor's existing parameter rows instead of rebuilding them, so moving between hosts costs the same regardless of how many parameters each has.
+- Deleting a host now selects the next host instead of jumping to the top of the list.
+- Excludes Textual 2.0.0 and 2.0.1, whose `OptionList` does not display added options.
 
 ## [0.3.0] - 2026-03-12
 ### Added

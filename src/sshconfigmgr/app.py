@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -18,8 +19,10 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    OptionList,
     Static,
 )
+from textual.widgets.option_list import Option
 
 from sshconfigmgr.ssh_config import ConfigChangedError, HostEntry, SSHConfig
 
@@ -70,33 +73,32 @@ Footer {
     text-style: bold;
 }
 
-ListView {
+#host-list {
     background: #1c1c1c;
     height: 1fr;
+    max-height: 100%;
     border: none;
     padding: 1 0;
 }
 
-ListItem {
+#host-list:focus {
+    border: none;
+}
+
+#host-list > .option-list--option {
     padding: 0 2;
     color: #888888;
-    height: 1;
-    border: none;
 }
 
-ListItem.--highlight {
+#host-list > .option-list--option-highlighted,
+#host-list:focus > .option-list--option-highlighted {
     background: #1a2e3a;
     color: #c8c8c8;
-    border: none;
+    text-style: none;
 }
 
-ListItem > Label {
-    width: 100%;
-    color: #888888;
-}
-
-ListItem.--highlight > Label {
-    color: #c8c8c8;
+#host-list > .option-list--option-hover {
+    background: #222222;
 }
 
 #sidebar-actions {
@@ -650,6 +652,20 @@ class ParamRow(Widget):
         yield Input(self._val, placeholder="Value", classes="param-val")
         yield Button("×", classes="param-del")
 
+    def load(self, key: str, value: str) -> None:
+        """Show a different key/value in this row, reusing its widgets.
+
+        Building a row's widgets is the main cost of switching hosts, so the
+        editor reuses rows rather than remounting them.  Input.Changed is
+        suppressed: this is a display change, not an edit.
+        """
+        self._key, self._val = key, value
+        # Before compose there are no Inputs yet; compose() reads the fields.
+        for inp in self.query(Input):
+            with inp.prevent(Input.Changed):
+                inp.value = key if inp.has_class("param-key") else value
+            inp.cursor_position = len(inp.value)
+
     @property
     def key(self) -> str:
         return self._key
@@ -674,14 +690,27 @@ class ParamRow(Widget):
 # ─── Widgets (continued) ──────────────────────────────────────────────────────
 
 
-class HostListView(ListView):
-    """ListView with vim-style j/k navigation."""
+class HostList(OptionList):
+    """Host list with vim-style j/k navigation.
+
+    An OptionList renders its rows as lines rather than one widget per
+    entry, so its cost doesn't grow with the number of hosts.
+    """
 
     BINDINGS = [
-        *ListView.BINDINGS,
+        *OptionList.BINDINGS,
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
     ]
+
+    # OptionList wraps around at the ends; stop there instead, as ListView did.
+    def action_cursor_down(self) -> None:
+        if self.highlighted is None or self.highlighted < self.option_count - 1:
+            super().action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        if self.highlighted is None or self.highlighted > 0:
+            super().action_cursor_up()
 
 
 # ─── Application ──────────────────────────────────────────────────────────────
@@ -706,7 +735,6 @@ class SSHConfigApp(App[None]):
         self._config = SSHConfig(path=config_path)
         self._current_entry: Optional[HostEntry] = None
         self._modified = False
-        self._loading = False        # guard against spurious Highlighted events
         # Rows of the entry being edited, in order.  Tracked explicitly rather
         # than queried from the DOM, where removed rows linger until pruned.
         self._rows: list[ParamRow] = []
@@ -718,7 +746,7 @@ class SSHConfigApp(App[None]):
         with Horizontal(id="main"):
             with Vertical(id="sidebar"):
                 yield Static("HOSTS", classes="pane-title")
-                yield HostListView(id="host-list")
+                yield HostList(id="host-list")
                 with Horizontal(id="sidebar-actions"):
                     yield Button("New Host", id="btn-new")
                     yield Button("Edit Host", id="btn-edit-host")
@@ -740,7 +768,6 @@ class SSHConfigApp(App[None]):
     # ── Config I/O ───────────────────────────────────────────────────────────
 
     def _load_config(self, path: Path) -> None:
-        self._loading = True
         self._config_path = path
 
         if not path.exists():
@@ -751,25 +778,32 @@ class SSHConfigApp(App[None]):
 
         self._current_entry = None
         self._modified = False
-        self._rebuild_list()
         self._update_title()
         self._show_empty()
-        self._loading = False
+        self._rebuild_list(select=0)
 
-        # Select first entry if any
-        if self._config.entries:
-            lv = self.query_one("#host-list", HostListView)
-            lv.index = 0
+    def _rebuild_list(self, select: Optional[int] = None) -> None:
+        """Repopulate the host list, then select entry *select* (clamped)."""
+        host_list = self.query_one("#host-list", HostList)
+        host_list.clear_options()
+        host_list.add_options(Option(self._entry_label(e)) for e in self._config.entries)
+        if select is not None and self._config.entries:
+            self._select(min(max(select, 0), len(self._config.entries) - 1))
 
-    def _rebuild_list(self) -> None:
-        lv = self.query_one("#host-list", HostListView)
-        lv.clear()
-        for entry in self._config.entries:
-            lv.append(ListItem(Label(self._entry_label(entry))))
+    def _select(self, index: int) -> None:
+        """Highlight entry *index* in the list and show it in the editor."""
+        host_list = self.query_one("#host-list", HostList)
+        if host_list.highlighted != index:
+            host_list.highlighted = index
+        entry = self._config.entries[index]
+        if entry is not self._current_entry:
+            self._sync_params_to_entry()
+            self._load_entry(entry)
 
     @staticmethod
-    def _entry_label(entry: HostEntry) -> str:
-        return entry.pattern if entry.kind == "Host" else f"{entry.kind} {entry.pattern}"
+    def _entry_label(entry: HostEntry) -> Text:
+        # Text, not str: patterns and Match criteria must not be parsed as markup.
+        return Text(entry.pattern if entry.kind == "Host" else f"{entry.kind} {entry.pattern}")
 
     def _update_title(self) -> None:
         mod = " (unsaved)" if self._modified else ""
@@ -799,13 +833,21 @@ class SSHConfigApp(App[None]):
     def _load_entry(self, entry: HostEntry) -> None:
         self._current_entry = entry
         self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
-        self._clear_rows()
         self.query_one("#empty-msg").display = False
-        self.query_one("#add-field").display = True
         add_btn = self.query_one("#add-field")
-        self._rows = [ParamRow(key, value) for key, value in entry.params]
-        for row in self._rows:
-            add_btn.parent.mount(row, before=add_btn)
+        add_btn.display = True
+        # Reuse existing rows; only mount or remove the difference in count.
+        params = entry.params
+        reused, surplus = self._rows[: len(params)], self._rows[len(params):]
+        for row in surplus:
+            row.remove()
+        for row, (key, value) in zip(reused, params):
+            row.load(key, value)
+        added = [ParamRow(key, value) for key, value in params[len(reused):]]
+        if added:
+            add_btn.parent.mount_all(added, before=add_btn)
+        self._rows = reused + added
+        self.query_one("#params-scroll").scroll_home(animate=False)
 
     def _sync_params_to_entry(self) -> None:
         if self._current_entry is None:
@@ -832,18 +874,12 @@ class SSHConfigApp(App[None]):
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
-    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
-        if self._loading or event.item is None:
-            return
-        lv = self.query_one("#host-list", HostListView)
-        idx = lv.index
-        if idx is None or idx >= len(self._config.entries):
-            return
-        new_entry = self._config.entries[idx]
-        if new_entry is self._current_entry:
-            return
-        self._sync_params_to_entry()
-        self._load_entry(new_entry)
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        # Read the list's current state rather than the event's index: the
+        # list may have been rebuilt since this message was posted.
+        idx = self.query_one("#host-list", HostList).highlighted
+        if idx is not None and idx < len(self._config.entries):
+            self._select(idx)
 
     def on_param_row_changed(self, event: ParamRow.Changed) -> None:
         self._sync_params_to_entry()
@@ -874,20 +910,15 @@ class SSHConfigApp(App[None]):
     # ── Actions ──────────────────────────────────────────────────────────────
 
     def action_focus_list(self) -> None:
-        self.query_one("#host-list", HostListView).focus()
+        self.query_one("#host-list", HostList).focus()
 
     def action_new_host(self) -> None:
         def on_result(pattern: Optional[str]) -> None:
             if not pattern:
                 return
             self._sync_params_to_entry()
-            entry = self._config.add_entry(pattern)
-            self._loading = True
-            self._rebuild_list()
-            self._loading = False
-            self._load_entry(entry)
-            lv = self.query_one("#host-list", HostListView)
-            lv.index = len(self._config.entries) - 1
+            self._config.add_entry(pattern)
+            self._rebuild_list(select=len(self._config.entries) - 1)
             self._refresh_modified()
 
         self.push_screen(
@@ -905,14 +936,10 @@ class SSHConfigApp(App[None]):
             if not new_pattern:
                 return
             entry.pattern = new_pattern
-            lv = self.query_one("#host-list", HostListView)
-            current_idx = lv.index
-            self._loading = True
-            self._rebuild_list()
-            self._loading = False
+            self.query_one("#host-list", HostList).replace_option_prompt_at_index(
+                self._config.entries.index(entry), self._entry_label(entry)
+            )
             self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
-            if current_idx is not None:
-                lv.index = current_idx
             self._refresh_modified()
 
         self.push_screen(
@@ -935,17 +962,16 @@ class SSHConfigApp(App[None]):
             if not confirmed:
                 return
             entry_to_remove = self._current_entry
+            removed_at = self._config.entries.index(entry_to_remove)
             self._current_entry = None
             self._config.remove_entry(entry_to_remove)
-            self._loading = True
-            self._rebuild_list()
-            self._loading = False
             self._refresh_modified()
             if self._config.entries:
-                lv = self.query_one("#host-list", HostListView)
-                lv.index = 0
-                self._load_entry(self._config.entries[0])
+                # Stay at the same position: select the next host (or the
+                # new last one) rather than jumping to the top.
+                self._rebuild_list(select=removed_at)
             else:
+                self._rebuild_list()
                 self._show_empty()
 
         self.push_screen(
