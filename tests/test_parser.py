@@ -117,16 +117,9 @@ def test_preserve_preamble_comments(tmp_config: Path) -> None:
     assert len(config.entries) == 1
 
 
-def test_include_directive_parsed_as_preamble_line(tmp_config: Path) -> None:
-    """An Include directive before any Host block is processed as a preamble
-    non-comment line.  The entry itself is still parsed correctly.
-
-    Known parser limitation: the current implementation resets config.preamble
-    to the trailing `pending` buffer when the first Host line is encountered,
-    which can cause previously-accumulated preamble lines to be overwritten.
-    This test documents the actual current behaviour rather than asserting the
-    include is preserved, so CI stays green while the limitation is understood.
-    """
+def test_include_directive_preserved_in_preamble(tmp_config: Path) -> None:
+    """An Include directive before any Host block stays in the preamble and
+    survives a save."""
     write_config(
         tmp_config,
         "Include ~/.ssh/conf.d/*.conf\n"
@@ -135,9 +128,11 @@ def test_include_directive_parsed_as_preamble_line(tmp_config: Path) -> None:
         "    Hostname 10.0.0.1\n",
     )
     config = SSHConfig.from_path(tmp_config)
-    # The Host block is always parsed correctly regardless of preamble handling.
     assert len(config.entries) == 1
     assert config.entries[0].pattern == "myserver"
+    assert "Include ~/.ssh/conf.d/*.conf" in config.preamble
+    config.save()
+    assert tmp_config.read_text().startswith("Include ~/.ssh/conf.d/*.conf\n")
 
 
 # ─── Per-entry leading comments ───────────────────────────────────────────────

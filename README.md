@@ -10,7 +10,8 @@ A terminal UI for managing SSH client configuration files (`~/.ssh/config`).
 - Add, rename, and delete host entries
 - Add configuration fields with autocomplete — all `ssh_config(5)` keywords are available, filtered as you type; single-use keywords already present in the current host block are excluded
 - Validates data on save (e.g. Port range)
-- Preserves preamble comments and per-entry leading comments on save
+- Lossless editing: comments, blank lines, indentation, `Key=Value` syntax, `Include`/`Match` blocks and line endings are preserved — only the lines you change are rewritten
+- Atomic saves that keep the file's permissions (new files are created `0600`), write through symlinks, and refuse to overwrite changes made by another program without confirmation
 - Open any SSH config file at launch or switch files at runtime
 - Prompts to save, discard, or cancel on quit when there are unsaved changes
 

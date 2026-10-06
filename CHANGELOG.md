@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Fixed
+- `Include` and other directives before the first `Host` block were deleted on save.
+- `Key=Value` / `Key = Value` lines were dropped, and `Host=name` headers were merged into the previous block.
+- `Match` blocks were merged into the preceding `Host` block; they are now listed as their own entries.
+- Comments inside a block moved to the next block; a trailing comment at end of file was dropped.
+- Blank lines accumulated by one per save.
+- Non-UTF-8 bytes were replaced with U+FFFD on save.
+
+### Changed
+- The parser is now lossless: an unmodified config saves byte-for-byte identical, and edits re-render only the changed lines using the block's existing indentation and separator style.
+- Saves are atomic (temp file, fsync, rename), preserve the existing file mode and ownership, create new files as `0600`, and write through symlinks.
+- Saving now detects if the file changed on disk since it was opened and asks before overwriting.
+
 ## [0.3.0] - 2026-03-12
 ### Added
 - **Source Layout**: Migrated code to a `src/` directory structure for better packaging compliance.

@@ -21,7 +21,7 @@ from textual.widgets import (
     Static,
 )
 
-from sshconfigmgr.ssh_config import HostEntry, SSHConfig
+from sshconfigmgr.ssh_config import ConfigChangedError, HostEntry, SSHConfig
 
 # ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -754,7 +754,11 @@ class SSHConfigApp(App[None]):
         lv = self.query_one("#host-list", HostListView)
         lv.clear()
         for entry in self._config.entries:
-            lv.append(ListItem(Label(entry.pattern)))
+            lv.append(ListItem(Label(self._entry_label(entry))))
+
+    @staticmethod
+    def _entry_label(entry: HostEntry) -> str:
+        return entry.pattern if entry.kind == "Host" else f"{entry.kind} {entry.pattern}"
 
     def _update_title(self) -> None:
         mod = " (unsaved)" if self._modified else ""
@@ -777,7 +781,7 @@ class SSHConfigApp(App[None]):
     def _load_entry(self, entry: HostEntry) -> None:
         self._loading_entry = True
         self._current_entry = entry
-        self.query_one("#editor-header", Static).update(f"  Host {entry.pattern}")
+        self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
         for row in self.query(ParamRow):
             row.remove()
         self.query_one("#empty-msg").display = False
@@ -893,7 +897,7 @@ class SSHConfigApp(App[None]):
             self._loading = True
             self._rebuild_list()
             self._loading = False
-            self.query_one("#editor-header", Static).update(f"  Host {entry.pattern}")
+            self.query_one("#editor-header", Static).update(f"  {entry.kind} {entry.pattern}")
             if current_idx is not None:
                 lv.index = current_idx
             self._mark_modified()
@@ -942,13 +946,31 @@ class SSHConfigApp(App[None]):
         if errors:
             self.notify("\n".join(errors), title="Validation error", severity="error", timeout=6)
             return
+        self._write_config()
+
+    def _write_config(self, force: bool = False) -> None:
         try:
-            self._config.save()
-            self._modified = False
-            self._update_title()
-            self.notify("Saved.", title="sshconfigmgr", timeout=2)
+            self._config.save(force=force)
+        except ConfigChangedError:
+            def on_result(confirmed: bool) -> None:
+                if confirmed:
+                    self._write_config(force=True)
+
+            self.push_screen(
+                ConfirmScreen(
+                    f"{self._config_path} was modified by another program since it "
+                    "was opened. Overwrite those changes?",
+                    "File Changed on Disk",
+                ),
+                on_result,
+            )
+            return
         except OSError as exc:
             self.notify(str(exc), title="Save failed", severity="error")
+            return
+        self._modified = False
+        self._update_title()
+        self.notify("Saved.", title="sshconfigmgr", timeout=2)
 
     def action_open_file(self) -> None:
         def on_path(path_str: Optional[str]) -> None:
