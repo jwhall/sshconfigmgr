@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-06
 ### Added
 - Save (`Ctrl+S` / Save button) opens a Save dialog.
 - "Validate config with SSH?" option in the Save and Unsaved Changes dialogs: runs `ssh -G` on the config as it would be written, then saves (showing "✔️ Validated"), or on failure offers "Show error" (view ssh's output and return to the editor) or "Continue anyway". The option starts checked when `ssh` is installed and is remembered for the session.
