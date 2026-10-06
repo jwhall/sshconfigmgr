@@ -17,8 +17,6 @@ from textual.widgets import (
     Header,
     Input,
     Label,
-    ListItem,
-    ListView,
     OptionList,
     Static,
 )
@@ -68,7 +66,8 @@ Footer {
     background: #202020;
     color: #505050;
     padding: 0 1;
-    height: 1;
+    /* Heights include the border: one row of text plus the bottom border. */
+    height: 2;
     border-bottom: solid #2a2a2a;
     text-style: bold;
 }
@@ -129,11 +128,7 @@ Footer {
 }
 
 #editor-header {
-    background: #202020;
     color: #6a9fb5;
-    padding: 0 1;
-    height: 1;
-    border-bottom: solid #2a2a2a;
 }
 
 #params-scroll {
@@ -491,6 +486,35 @@ SSH_KEYWORDS_SINGLE: list[str] = [
 _SINGLE_LOWER: set[str] = {k.lower() for k in SSH_KEYWORDS_SINGLE}
 
 
+class NoWrapOptionList(OptionList):
+    """OptionList whose cursor stops at the first and last option.
+
+    OptionList wraps around at the ends by default; ListView, which these
+    lists replaced, did not.
+    """
+
+    def action_cursor_down(self) -> None:
+        if self.highlighted is None or self.highlighted < self.option_count - 1:
+            super().action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        if self.highlighted is None or self.highlighted > 0:
+            super().action_cursor_up()
+
+
+class KeywordList(NoWrapOptionList):
+    """Suggestion list for AddFieldScreen; Up on the first option posts AtTop."""
+
+    class AtTop(Message):
+        pass
+
+    def action_cursor_up(self) -> None:
+        if self.highlighted in (None, 0):
+            self.post_message(self.AtTop())
+        else:
+            super().action_cursor_up()
+
+
 class AddFieldScreen(ModalScreen[Optional[str]]):
     """Modal for choosing a new SSH config keyword with live-filtered suggestions.
 
@@ -499,6 +523,7 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
 
     BINDINGS = [
         Binding("escape", "dismiss(None)", show=False),
+        Binding("down", "focus_suggestions", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -510,8 +535,10 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
         border: solid #444444;
         padding: 1 2;
         width: 60;
-        height: auto;
-        max-height: 80vh;
+        /* Fixed height so the list below can flex: on short terminals the
+           list shrinks and the buttons stay visible. */
+        height: 80%;
+        max-height: 26;
     }
     #add-field-dialog .dialog-title {
         text-style: bold;
@@ -519,18 +546,21 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
         margin-bottom: 1;
     }
     #suggestion-list {
-        height: 10;
+        height: 1fr;
+        min-height: 3;
         border: tall #2e2e2e;
         background: #181818;
         margin-top: 0;
         margin-bottom: 1;
     }
-    #suggestion-list ListItem {
+    #suggestion-list > .option-list--option {
         padding: 0 1;
     }
-    #suggestion-list ListItem.--highlight {
+    #suggestion-list > .option-list--option-highlighted,
+    #suggestion-list:focus > .option-list--option-highlighted {
         background: #1a2e3a;
         color: #c8c8c8;
+        text-style: none;
     }
     #add-field-dialog .dialog-buttons {
         layout: horizontal;
@@ -573,7 +603,7 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
         with Vertical(id="add-field-dialog"):
             yield Label("Add Configuration Keyword", classes="dialog-title")
             yield Input(placeholder="Type to filter…", id="kw-input")
-            yield ListView(id="suggestion-list")
+            yield KeywordList(id="suggestion-list")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Add", id="add-kw", variant="primary")
@@ -584,10 +614,9 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
 
     def _refresh_list(self, text: str) -> None:
         self._current_matches = self._filtered(text)
-        lv = self.query_one("#suggestion-list", ListView)
-        lv.clear()
-        for kw in self._current_matches:
-            lv.append(ListItem(Label(kw)))
+        suggestions = self.query_one("#suggestion-list", KeywordList)
+        suggestions.clear_options()
+        suggestions.add_options(self._current_matches)
 
     def _dismiss_from_input(self) -> None:
         text = self.query_one("#kw-input", Input).value.strip()
@@ -605,21 +634,21 @@ class AddFieldScreen(ModalScreen[Optional[str]]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._dismiss_from_input()
 
-    def on_key(self, event) -> None:
-        if event.key == "down":
-            self.query_one("#suggestion-list", ListView).focus()
-            event.prevent_default()
-        elif event.key == "up":
-            lv = self.query_one("#suggestion-list", ListView)
-            if lv.index == 0:
-                self.query_one("#kw-input", Input).focus()
-                event.prevent_default()
+    def action_focus_suggestions(self) -> None:
+        # Reached via the screen's "down" binding, i.e. only when the focused
+        # widget (the filter input) doesn't handle Down itself.
+        suggestions = self.query_one("#suggestion-list", KeywordList)
+        if suggestions.option_count:
+            suggestions.focus()
+            if suggestions.highlighted is None:
+                suggestions.highlighted = 0
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        lv = self.query_one("#suggestion-list", ListView)
-        idx = lv.index
-        if idx is not None and 0 <= idx < len(self._current_matches):
-            self.dismiss(self._current_matches[idx])
+    def on_keyword_list_at_top(self, event: KeywordList.AtTop) -> None:
+        self.query_one("#kw-input", Input).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self._current_matches):
+            self.dismiss(self._current_matches[event.option_index])
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "add-kw":
@@ -690,7 +719,7 @@ class ParamRow(Widget):
 # ─── Widgets (continued) ──────────────────────────────────────────────────────
 
 
-class HostList(OptionList):
+class HostList(NoWrapOptionList):
     """Host list with vim-style j/k navigation.
 
     An OptionList renders its rows as lines rather than one widget per
@@ -702,15 +731,6 @@ class HostList(OptionList):
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
     ]
-
-    # OptionList wraps around at the ends; stop there instead, as ListView did.
-    def action_cursor_down(self) -> None:
-        if self.highlighted is None or self.highlighted < self.option_count - 1:
-            super().action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        if self.highlighted is None or self.highlighted > 0:
-            super().action_cursor_up()
 
 
 # ─── Application ──────────────────────────────────────────────────────────────

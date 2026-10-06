@@ -496,3 +496,105 @@ def test_cursor_stops_at_list_ends(tmp_config: Path) -> None:
         assert app._current_entry.pattern == "two"
 
     run(tmp_config, script)
+
+
+# ─── Keyword picker ───────────────────────────────────────────────────────────
+
+
+async def open_picker(app: SSHConfigApp, pilot: Pilot):
+    from sshconfigmgr.app import AddFieldScreen
+
+    app._do_add_field()
+    await pilot.pause()
+    assert isinstance(app.screen, AddFieldScreen)
+    return app.screen
+
+
+def suggestions(screen) -> list[str]:
+    from sshconfigmgr.app import KeywordList
+
+    kl = screen.query_one(KeywordList)
+    return [str(kl.get_option_at_index(i).prompt) for i in range(kl.option_count)]
+
+
+def test_picker_filters_and_hides_used_single_keywords(tmp_config: Path) -> None:
+    tmp_config.write_text("Host a\n    LogLevel INFO\n    LocalForward 1 h:2\n")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        screen = await open_picker(app, pilot)
+        await pilot.press(*"Lo")
+        await pilot.pause()
+        # LogLevel is single-use and already present; LocalForward may repeat.
+        assert suggestions(screen) == ["LocalCommand", "LocalForward", "LogVerbose"]
+
+    run(tmp_config, script)
+
+
+def test_picker_keyboard_navigation(tmp_config: Path) -> None:
+    from sshconfigmgr.app import KeywordList
+
+    tmp_config.write_text("Host a\n")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        screen = await open_picker(app, pilot)
+        await pilot.press(*"Loc")
+        await pilot.press("down")
+        await pilot.pause()
+        kl = screen.query_one(KeywordList)
+        assert screen.focused is kl and kl.highlighted == 0
+        await pilot.press("down", "down", "down")  # stops at the last option
+        await pilot.pause()
+        assert kl.highlighted == 1
+        await pilot.press("up", "up")  # past the top returns to the input
+        await pilot.pause()
+        assert screen.focused is screen.query_one("#kw-input", Input)
+        await pilot.press("down", "down", "enter")
+        await pilot.pause()
+        assert app._current_entry.params == [("LocalForward", "")]
+
+    run(tmp_config, script)
+
+
+def test_picker_enter_in_input_uses_canonical_case_or_free_text(tmp_config: Path) -> None:
+    tmp_config.write_text("Host a\n")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await open_picker(app, pilot)
+        await pilot.press(*"proxyjump", "enter")
+        await pilot.pause()
+        await open_picker(app, pilot)
+        await pilot.press(*"XCustomThing", "enter")
+        await pilot.pause()
+        assert [k for k, _ in app._current_entry.params] == ["ProxyJump", "XCustomThing"]
+
+    run(tmp_config, script)
+
+
+def test_picker_click_selects(tmp_config: Path) -> None:
+    from sshconfigmgr.app import KeywordList
+
+    tmp_config.write_text("Host a\n")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        screen = await open_picker(app, pilot)
+        await pilot.press(*"Port")
+        await pilot.pause()
+        assert suggestions(screen) == ["Port"]
+        await pilot.click(KeywordList, offset=(3, 1))
+        await pilot.pause()
+        assert app._current_entry.params == [("Port", "")]
+
+    run(tmp_config, script)
+
+
+def test_picker_escape_cancels(tmp_config: Path) -> None:
+    tmp_config.write_text("Host a\n")
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        await open_picker(app, pilot)
+        await pilot.press(*"Port", "escape")
+        await pilot.pause()
+        assert app._current_entry.params == []
+        assert not app._modified
+
+    run(tmp_config, script)

@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file. This projec
 - Comments inside a block moved to the next block; a trailing comment at end of file was dropped.
 - Blank lines accumulated by one per save.
 - Non-UTF-8 bytes were replaced with U+FFFD on save.
+- The "HOSTS" pane title and the editor header (current host name) were blank: a `height: 1` box with a bottom border has no room for text.
 - "Save & Quit" quit (discarding edits) when the save failed validation, failed to write, or an overwrite was declined; it now only quits after a successful save.
 - Opening another file (`o`) discarded unsaved changes without asking; it now offers Save / Discard / Cancel first.
 - Moving through the host list (and sometimes just launching) marked the file as unsaved. The unsaved flag is now derived from content — it is set only when the file as it would be written differs from what was last loaded or saved, so undoing an edit by hand also clears it.
@@ -22,6 +23,7 @@ All notable changes to this project will be documented in this file. This projec
 - Switching hosts reuses the editor's existing parameter rows instead of rebuilding them, so moving between hosts costs the same regardless of how many parameters each has.
 - Deleting a host now selects the next host instead of jumping to the top of the list.
 - Excludes Textual 2.0.0 and 2.0.1, whose `OptionList` does not display added options.
+- The keyword picker's suggestion list is now an `OptionList` (no longer rebuilds ~80 widgets per keystroke), and it grows or shrinks with the terminal so its Cancel/Add buttons stay visible on short terminals.
 
 ## [0.3.0] - 2026-03-12
 ### Added
