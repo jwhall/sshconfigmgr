@@ -66,22 +66,27 @@ If the specified file does not exist you will be prompted to create it.
 ## Interface
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│ sshconfigmgr — /home/user/.ssh/config                                │
-├──────────────────┬───────────────────────────────────────────────────┤
-│ HOSTS            │  Host bastion                                     │
-│                  │ ┌────────────────┐ ┌───────────────────────────┐  │
-│  bastion         │ │ HostName       │ │ 10.0.0.1                  │  │
-│  web-prod        │ └────────────────┘ └───────────────────────────┘  │
-│  db-replica      │ ┌────────────────┐ ┌───────────────────────────┐  │
-│                  │ │ User           │ │ admin                     │  │
-│                  │ └────────────────┘ └───────────────────────────┘  │
-│                  │                                                   │
-│                  │  + Add Field                                      │
-│                  │                                                   │
-├──────────────────┤                         ┌────────┬───────┬──────┐ │
-│  New   Edit      │                         │ Delete │ Save  │ Quit │ │
-└──────────────────┴─────────────────────────┴────────┴───────┴──────┘─┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ sshconfigmgr — /home/user/.ssh/config                                      │
+├───────────────────────────┬────────────────────────────────────────────────┤
+│ HOSTS                     │  Host bastion                                  │
+├───────────────────────────┼────────────────────────────────────────────────┤
+│                           │ ┌────────────┐ ┌───────────────────────┐ ┌───┐ │
+│  bastion                  │ │ HostName   │ │ 10.0.0.1              │ │ × │ │
+│  web-prod                 │ └────────────┘ └───────────────────────┘ └───┘ │
+│  db-replica               │ ┌────────────┐ ┌───────────────────────┐ ┌───┐ │
+│  Match host *.corp        │ │ User       │ │ admin                 │ │ × │ │
+│                           │ └────────────┘ └───────────────────────┘ └───┘ │
+│                           │ ┌───────────────┐                              │
+│                           │ │ + Add Keyword │                              │
+│                           │ └───────────────┘                              │
+├───────────────────────────┼────────────────────────────────────────────────┤
+│ ┌──────────┐┌───────────┐ │                     ┌────────┐┌──────┐┌──────┐ │
+│ │ New Host ││ Edit Host │ │                     │ Delete ││ Save ││ Quit │ │
+│ └──────────┘└───────────┘ │                     └────────┘└──────┘└──────┘ │
+├───────────────────────────┴────────────────────────────────────────────────┤
+│ ^S Save   n New   d Delete   o Open   Esc List   q Quit                    │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Keyboard shortcuts
@@ -96,9 +101,9 @@ If the specified file does not exist you will be prompted to create it.
 | `q`        | Quit (prompts if unsaved changes)   |
 | `j` / `k`  | Move down / up in the host list     |
 
-### Adding a configuration field
+### Adding a configuration keyword
 
-Click **+ Add Field** or press it from the keyboard to open the field picker. Start typing a keyword name to filter the list — for example, typing `Lo` narrows it to `LocalCommand`, `LocalForward`, and `LogLevel`. Navigate with the arrow keys, or click to select. Press `Enter` to confirm, `Esc` to cancel.
+Click **+ Add Keyword** (or Tab to it and press `Enter`) to open the keyword picker. Start typing a keyword name to filter the list — for example, typing `Loc` narrows it to `LocalCommand` and `LocalForward`. Press `↓` to move from the filter into the list and `↑` on the first entry to return to the filter, or click an entry to select it. Press `Enter` to confirm, `Esc` to cancel.
 
 Keywords that may only appear once per host block (the majority of `ssh_config(5)` directives) are removed from the list once they are already present in the current entry. Keywords that may repeat (`IdentityFile`, `LocalForward`, `RemoteForward`, `DynamicForward`, `CertificateFile`, `SendEnv`, `SetEnv`, `GlobalKnownHostsFile`) remain available.
 
