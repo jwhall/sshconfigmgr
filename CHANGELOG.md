@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- **Copy Host Action**: Added a "Copy" button next to "Edit Host" that duplicates the selected Host entry, with all of its keywords and values, under a new Host pattern.
+
 ## [0.3.0] - 2026-03-12
 ### Added
 - **Source Layout**: Migrated code to a `src/` directory structure for better packaging compliance.

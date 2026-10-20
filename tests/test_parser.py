@@ -247,6 +247,28 @@ def test_add_multiple_entries(tmp_config: Path) -> None:
     assert [e.pattern for e in config.entries] == ["alpha", "beta", "gamma"]
 
 
+def test_copy_entry(tmp_config: Path) -> None:
+    """copy_entry appends a new entry with the same params under a new pattern."""
+    config = SSHConfig(path=tmp_config)
+    source = config.add_entry("src")
+    source.params = [("Hostname", "src.example.com"), ("IdentityFile", "~/.ssh/a"),
+                     ("IdentityFile", "~/.ssh/b"), ("Port", "2222")]
+    copy = config.copy_entry(source, "dst")
+    assert [e.pattern for e in config.entries] == ["src", "dst"]
+    assert copy.params == source.params
+
+
+def test_copy_entry_is_independent(tmp_config: Path) -> None:
+    """Modifying the copy does not affect the source entry."""
+    config = SSHConfig(path=tmp_config)
+    source = config.add_entry("src")
+    source.set("User", "alice")
+    copy = config.copy_entry(source, "dst")
+    copy.set("User", "bob")
+    copy.set("Port", "22")
+    assert source.params == [("User", "alice")]
+
+
 def test_remove_entry(tmp_config: Path) -> None:
     """remove_entry deletes the entry from the list."""
     write_config(

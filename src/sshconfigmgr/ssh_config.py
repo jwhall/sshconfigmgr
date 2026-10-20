@@ -113,5 +113,11 @@ class SSHConfig:
         self.entries.append(entry)
         return entry
 
+    def copy_entry(self, source: HostEntry, pattern: str) -> HostEntry:
+        """Append a new entry with *pattern* and a copy of *source*'s params."""
+        entry = HostEntry(pattern=pattern, params=list(source.params))
+        self.entries.append(entry)
+        return entry
+
     def remove_entry(self, entry: HostEntry) -> None:
         self.entries.remove(entry)
