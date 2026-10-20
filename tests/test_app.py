@@ -525,6 +525,29 @@ def test_new_host_is_selected(tmp_config: Path) -> None:
     run(tmp_config, script)
 
 
+def test_copy_host_duplicates_params_and_selects_copy(tmp_config: Path) -> None:
+    tmp_config.write_text(VARIED)
+
+    async def script(app: SSHConfigApp, pilot: Pilot) -> None:
+        app._select(1)  # three
+        await settle(pilot)
+        # An unsaved edit on the source is carried into the copy.
+        app.query(ParamRow).first().query_one(".param-val", Input).value = "edited"
+        await settle(pilot)
+        await choose(pilot, "btn-copy-host")
+        assert isinstance(app.screen, InputScreen)
+        app.screen.query_one("#dialog-input", Input).value = "three-copy"
+        await choose(pilot, "ok")
+        expected = [("User", "edited"), ("Port", "3"), ("ForwardAgent", "yes")]
+        assert host_list_labels(app)[-1] == "three-copy"
+        assert app._current_entry.pattern == "three-copy"
+        assert shown_params(app) == expected
+        assert app._config.entries[1].params == expected
+        assert app._modified
+
+    run(tmp_config, script)
+
+
 def test_open_shows_first_entry_of_new_file(tmp_config: Path, tmp_path: Path) -> None:
     tmp_config.write_text(VARIED)
     other = tmp_path / "other"

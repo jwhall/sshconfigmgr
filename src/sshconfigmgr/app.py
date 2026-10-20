@@ -60,6 +60,7 @@ Footer {
 
 #sidebar {
     width: 30%;
+    min-width: 36;
     border-right: solid #2e2e2e;
     layout: vertical;
     background: #1c1c1c;
@@ -130,7 +131,7 @@ Footer {
 /* ── Editor ── */
 
 #editor {
-    width: 70%;
+    width: 1fr;
     layout: vertical;
 }
 
@@ -1145,14 +1146,9 @@ class SSHConfigApp(App[None]):
                 return
             # Capture any unsaved edits on the source before copying its params.
             self._sync_params_to_entry()
-            entry = self._config.copy_entry(source, pattern)
-            self._loading = True
-            self._rebuild_list()
-            self._loading = False
-            self._load_entry(entry)
-            lv = self.query_one("#host-list", HostListView)
-            lv.index = len(self._config.entries) - 1
-            self._mark_modified()
+            self._config.copy_entry(source, pattern)
+            self._rebuild_list(select=len(self._config.entries) - 1)
+            self._refresh_modified()
 
         self.push_screen(
             InputScreen("Copy host to...", "Copy Host Profile"),
