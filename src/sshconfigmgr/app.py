@@ -118,6 +118,10 @@ Footer {
     color: #808080;
 }
 
+#sidebar-actions #btn-copy-host {
+    min-width: 8;
+}
+
 #sidebar-actions Button:hover {
     background: #282828;
     color: #d4d4d4;
@@ -922,6 +926,7 @@ class SSHConfigApp(App[None]):
                 with Horizontal(id="sidebar-actions"):
                     yield Button("New Host", id="btn-new")
                     yield Button("Edit Host", id="btn-edit-host")
+                    yield Button("Copy", id="btn-copy-host")
             with Vertical(id="editor"):
                 yield Static("", id="editor-header", classes="pane-title")
                 with VerticalScroll(id="params-scroll"):
@@ -1075,6 +1080,8 @@ class SSHConfigApp(App[None]):
             self.action_new_host()
         elif bid == "btn-edit-host":
             self.action_edit_host()
+        elif bid == "btn-copy-host":
+            self.action_copy_host()
         elif bid == "btn-delete":
             self.action_delete_host()
         elif bid == "btn-save":
@@ -1124,6 +1131,31 @@ class SSHConfigApp(App[None]):
                 default=entry.pattern,
                 confirm_label="Save",
             ),
+            on_result,
+        )
+
+    def action_copy_host(self) -> None:
+        if self._current_entry is None:
+            self.notify("No host selected.", severity="warning")
+            return
+        source = self._current_entry
+
+        def on_result(pattern: Optional[str]) -> None:
+            if not pattern:
+                return
+            # Capture any unsaved edits on the source before copying its params.
+            self._sync_params_to_entry()
+            entry = self._config.copy_entry(source, pattern)
+            self._loading = True
+            self._rebuild_list()
+            self._loading = False
+            self._load_entry(entry)
+            lv = self.query_one("#host-list", HostListView)
+            lv.index = len(self._config.entries) - 1
+            self._mark_modified()
+
+        self.push_screen(
+            InputScreen("Copy host to...", "Copy Host Profile"),
             on_result,
         )
 
